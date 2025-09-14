@@ -1,0 +1,24 @@
+{
+    "e4be2d9f": {
+        "id": "e4be2d9f",
+        "user_id": 838464083,
+        "user_name": "Oleksandr",
+        "category": "Пропозиція 💡",
+        "text": "6j6j7j",
+        "timestamp": "2025-09-12T19:43:53.918478",
+        "status": "Відповіли",
+        "media_type": null,
+        "file_id": null
+    },
+    "56411496": {
+        "id": "56411496",
+        "user_id": 838464083,
+        "user_name": "Oleksandr",
+        "category": "Скарга 📄",
+        "text": "Yy",
+        "timestamp": "2025-09-12T19:45:33.987425",
+        "status": "Нове",
+        "media_type": null,
+        "file_id": null
+    }
+}
