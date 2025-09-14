@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gymnasium AI Bot</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        :root {
+            --tg-theme-bg-color: #18222d;
+            --tg-theme-text-color: #ffffff;
+            --tg-theme-button-color: #2ea6ff;
+            --tg-theme-button-text-color: #ffffff;
+        }
+        body {
+            background-color: var(--tg-theme-bg-color);
+            color: var(--tg-theme-text-color);
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+            overscroll-behavior: none;
+        }
+        #chat-messages::-webkit-scrollbar {
+            width: 4px;
+        }
+        #chat-messages::-webkit-scrollbar-thumb {
+            background-color: #4a5568;
+            border-radius: 20px;
+        }
+        .chat-bubble {
+            max-width: 80%;
+            padding: 10px 16px;
+            border-radius: 20px;
+            word-wrap: break-word;
+        }
+        .user-bubble {
+            background-color: var(--tg-theme-button-color);
+            color: var(--tg-theme-button-text-color);
+            align-self: flex-end;
+            border-bottom-right-radius: 4px;
+        }
+        .bot-bubble {
+            background-color: #2c3744;
+            color: var(--tg-theme-text-color);
+            align-self: flex-start;
+            border-bottom-left-radius: 4px;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid var(--tg-theme-button-color);
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen">
+
+    <div id="loader-screen" class="absolute inset-0 bg-gray-900 bg-opacity-80 flex items-center justify-center z-50">
+        <div class="loader"></div>
+    </div>
+
+    <header class="bg-[#1f2b38] p-3 text-center shadow-md z-10">
+        <h1 class="text-lg font-bold">Gymnasium AI Bot</h1>
+    </header>
+
+    <div id="app-content" class="flex flex-col flex-grow hidden">
+        <!-- Admin Panel (hidden by default) -->
+        <div id="admin-panel" class="hidden p-2 bg-[#1f2b38] border-b border-gray-700">
+            <div class="flex space-x-2 overflow-x-auto pb-2">
+                <button id="admin-stats-btn" class="flex-shrink-0 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg transition-colors">📊 Статистика</button>
+                <button id="admin-kb-view-btn" class="flex-shrink-0 bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition-colors">🔎 База Знань</button>
+                <button id="admin-broadcast-btn" class="flex-shrink-0 bg-purple-500 hover:bg-purple-600 text-white font-bold py-2 px-4 rounded-lg transition-colors">📢 Розсилка</button>
+            </div>
+            <div id="admin-output" class="mt-2 p-3 bg-gray-800 rounded-lg max-h-64 overflow-y-auto text-sm hidden"></div>
+        </div>
+
+        <!-- Chat Area -->
+        <main id="chat-messages" class="flex-grow overflow-y-auto p-4 flex flex-col space-y-4">
+            <!-- Messages will be appended here -->
+        </main>
+
+        <!-- Input Form -->
+        <footer class="p-2 bg-[#1f2b38] border-t border-gray-700">
+            <form id="message-form" class="flex items-center space-x-2">
+                <input type="text" id="message-input" placeholder="Напишіть ваше повідомлення..." class="flex-grow bg-gray-700 text-white rounded-full p-3 focus:outline-none focus:ring-2 focus:ring-[var(--tg-theme-button-color)] transition-shadow" autocomplete="off">
+                <button type="submit" class="bg-[var(--tg-theme-button-color)] text-[var(--tg-theme-button-text-color)] rounded-full w-12 h-12 flex items-center justify-center flex-shrink-0">
+                    <svg class="w-6 h-6 transform rotate-90" fill="currentColor" viewBox="0 0 20 20"><path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z"></path></svg>
+                </button>
+            </form>
+        </footer>
+    </div>
+
+    <script>
+        const tg = window.Telegram.WebApp;
+
+        // DOM Elements
+        const chatMessages = document.getElementById('chat-messages');
+        const messageForm = document.getElementById('message-form');
+        const messageInput = document.getElementById('message-input');
+        const adminPanel = document.getElementById('admin-panel');
+        const adminOutput = document.getElementById('admin-output');
+        const loaderScreen = document.getElementById('loader-screen');
+        const appContent = document.getElementById('app-content');
+
+        let userData = null;
+
+        // --- Utility Functions ---
+        function addMessage(text, sender = 'bot') {
+            const bubble = document.createElement('div');
+            bubble.className = `chat-bubble ${sender === 'user' ? 'user-bubble' : 'bot-bubble'}`;
+            bubble.textContent = text;
+            chatMessages.appendChild(bubble);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+        
+        function showAdminOutput(content) {
+            adminOutput.innerHTML = content;
+            adminOutput.classList.remove('hidden');
+        }
+
+        function hideAdminOutput() {
+            adminOutput.classList.add('hidden');
+        }
+
+        // --- API Functions ---
+        async function sendMessageToServer(text) {
+            try {
+                const response = await fetch('/api/sendMessage', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text, initData: tg.initData }),
+                });
+                if (!response.ok) throw new Error('Network response was not ok');
+                const result = await response.json();
+                addMessage("✅ Ваше повідомлення успішно надіслано адміністраторам. Вони дадуть відповідь особистим повідомленням у Telegram.");
+            } catch (error) {
+                console.error('Error sending message:', error);
+                addMessage("❌ Помилка! Не вдалося надіслати повідомлення. Спробуйте пізніше.");
+            }
+        }
+
+        // --- Admin Panel API Functions ---
+        async function getStats() {
+            try {
+                const response = await fetch('/api/stats', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ initData: tg.initData }),
+                });
+                const data = await response.json();
+                showAdminOutput(`<p class="font-bold">📊 Статистика:</p><p>Всього користувачів: ${data.user_count}</p>`);
+            } catch (error) {
+                showAdminOutput('<p class="text-red-400">Помилка завантаження статистики.</p>');
+            }
+        }
+
+        async function getKnowledgeBase() {
+             try {
+                const response = await fetch('/api/kb/view', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ initData: tg.initData }),
+                });
+                const data = await response.json();
+                let html = '<p class="font-bold mb-2">📚 База Знань:</p>';
+                if (Object.keys(data).length === 0) {
+                    html += '<p>База знань порожня.</p>';
+                } else {
+                    for (const [key, value] of Object.entries(data)) {
+                        html += `<div class="mb-2 p-2 bg-gray-700 rounded"><p class="font-semibold text-blue-300">${key}</p><p class="text-gray-300 text-xs">${value}</p></div>`;
+                    }
+                }
+                showAdminOutput(html);
+            } catch (error) {
+                showAdminOutput('<p class="text-red-400">Помилка завантаження бази знань.</p>');
+            }
+        }
+        
+        async function startBroadcast() {
+            const message = prompt("Введіть текст для розсилки всім користувачам:");
+            if (message && message.trim() !== "") {
+                if (confirm(`Ви впевнені, що хочете надіслати це повідомлення?\n\n"${message}"`)) {
+                    showAdminOutput('<p>📢 Починаю розсилку...</p>');
+                    try {
+                        const response = await fetch('/api/broadcast', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ message, initData: tg.initData }),
+                        });
+                        const data = await response.json();
+                        showAdminOutput(`<p class="text-green-400">✅ Розсилку завершено!</p><p>Надіслано: ${data.success}</p><p>Помилок: ${data.fail}</p>`);
+                    } catch (error) {
+                         showAdminOutput('<p class="text-red-400">Помилка під час розсилки.</p>');
+                    }
+                }
+            }
+        }
+
+
+        // --- Event Listeners ---
+        messageForm.addEventListener('submit', (e) => {
+            e.preventDefault();
+            const text = messageInput.value.trim();
+            if (text) {
+                addMessage(text, 'user');
+                sendMessageToServer(text);
+                messageInput.value = '';
+            }
+        });
+        
+        document.getElementById('admin-stats-btn').addEventListener('click', getStats);
+        document.getElementById('admin-kb-view-btn').addEventListener('click', getKnowledgeBase);
+        document.getElementById('admin-broadcast-btn').addEventListener('click', startBroadcast);
+
+
+        // --- Initialization ---
+        async function initializeApp() {
+            try {
+                const response = await fetch('/api/init', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ initData: tg.initData }),
+                });
+                if (!response.ok) throw new Error('Initialization failed');
+                
+                const data = await response.json();
+                userData = data.user;
+
+                if (data.isAdmin) {
+                    adminPanel.classList.remove('hidden');
+                }
+                
+                addMessage("Вітаю! Я - ваш персональний помічник. Напишіть своє питання, і я передам його адміністрації.");
+
+            } catch (error) {
+                console.error("Initialization Error:", error);
+                addMessage("Помилка ініціалізації. Будь ласка, спробуйте перезапустити додаток.");
+            } finally {
+                loaderScreen.classList.add('hidden');
+                appContent.classList.remove('hidden');
+            }
+        }
+
+        tg.ready();
+        tg.expand();
+        initializeApp();
+    </script>
+</body>
+</html>
