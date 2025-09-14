@@ -3,4 +3,6 @@ google-generativeai
 requests
 beautifulsoup4
 pytz
+aiohttp
+aiohttp_cors
 
