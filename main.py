@@ -14,13 +14,13 @@ from telegram.ext import (
 import requests
 from bs4 import BeautifulSoup
 import pytz
-from typing import Any, Callable
+from typing import Any, Callable, Dict
 import re
 import hashlib
 from urllib.parse import parse_qs
 
 # --- Веб-сервер імпорти ---
-from aiohttp import web
+from aiohttp import web, WSMsgType
 import aiohttp_cors
 
 # --- Налаштування ---
@@ -40,6 +40,7 @@ GYMNASIUM_URL = "https://brodygymnasium.e-schools.info"
 TARGET_CHANNEL_ID = -1002946740131
 NOTIFIED_ADMINS_FILE = 'notified_admins.json'
 ADMIN_CONTACTS_FILE = 'admin_contacts.json'
+CONVERSATIONS_FILE = 'conversations.json'
 
 # --- Кінець налаштувань ---
 
@@ -47,23 +48,20 @@ ADMIN_CONTACTS_FILE = 'admin_contacts.json'
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- Глобальні змінні для веб-сервера ---
+active_websockets: Dict[str, web.WebSocketResponse] = {}
+web_sessions: Dict[str, Dict] = {} 
+
 # --- Утиліти для збереження/зчитування JSON ---
-def load_data(filename: str) -> Any:
+def load_data(filename: str, default_type: Any = None) -> Any:
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except FileNotFoundError:
-        if filename in [NOTIFIED_ADMINS_FILE, 'user_ids.json']: return []
-        if filename in [ADMIN_CONTACTS_FILE, 'knowledge_base.json', 'website_content.json']: return {}
-        return None
-    except json.JSONDecodeError:
-        logger.warning(f"Файл {filename} пошкоджений. Повертаю відповідний тип за замовчуванням.")
-        if filename in [NOTIFIED_ADMINS_FILE, 'user_ids.json']: return []
-        if filename in [ADMIN_CONTACTS_FILE, 'knowledge_base.json', 'website_content.json']: return {}
-        return None
-    except Exception as e:
-        logger.error(f"Помилка load_data({filename}): {e}")
-        return None
+    except (FileNotFoundError, json.JSONDecodeError):
+        if default_type is not None:
+            return default_type
+        if 'user_ids' in filename or 'notified_admins' in filename: return []
+        return {}
 
 def save_data(data: Any, filename: str) -> None:
     try:
@@ -74,45 +72,124 @@ def save_data(data: Any, filename: str) -> None:
 
 # --- Web App Утиліти ---
 def get_user_from_init_data(init_data_str: str) -> dict | None:
-    """Parses user data from Telegram's initData string."""
-    params = parse_qs(init_data_str)
-    if 'user' in params:
-        user_data_str = params['user'][0]
-        return json.loads(user_data_str)
+    try:
+        params = parse_qs(init_data_str)
+        if 'user' in params:
+            return json.loads(params['user'][0])
+    except Exception:
+        return None
     return None
 
+async def get_user_context(request: web.Request) -> dict | None:
+    data = await request.json()
+    init_data = data.get('initData')
+    session_token = data.get('sessionToken')
+    
+    if init_data: return get_user_from_init_data(init_data)
+    if session_token and session_token in web_sessions: return web_sessions[session_token]
+    return None
+
+async def send_reply_to_user(ptb_app: Application, user_id: str | int, text: str):
+    conversations = load_data(CONVERSATIONS_FILE, {})
+    user_id_str = str(user_id)
+    if user_id_str not in conversations: conversations[user_id_str] = []
+    conversations[user_id_str].append({"sender": "bot", "text": text, "timestamp": datetime.now().isoformat()})
+    save_data(conversations, CONVERSATIONS_FILE)
+
+    if user_id_str in active_websockets:
+        try:
+            await active_websockets[user_id_str].send_json({'type': 'message', 'payload': {'text': text}})
+            logger.info(f"Надіслано відповідь через WS користувачу {user_id_str}")
+        except Exception as e:
+            logger.warning(f"WS send failed for {user_id_str}: {e}")
+            
+    if isinstance(user_id, int):
+        try:
+            await ptb_app.bot.send_message(chat_id=user_id, text=text)
+            logger.info(f"Надіслано відповідь через Telegram користувачу {user_id}")
+        except Exception as e:
+             logger.error(f"Не вдалося надіслати в Telegram користувачу {user_id}: {e}")
+
 # --- Web App Обробники ---
-async def handle_index(request: web.Request) -> web.FileResponse:
-    return web.FileResponse('./index.html')
+async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    user_id = None
+    async for msg in ws:
+        if msg.type == WSMsgType.TEXT:
+            try:
+                data = json.loads(msg.data)
+                if data.get('type') == 'auth':
+                    payload = data.get('payload', {})
+                    init_data = payload.get('initData')
+                    session_token = payload.get('sessionToken')
+                    
+                    user_info = None
+                    if init_data:
+                        user_info = get_user_from_init_data(init_data)
+                    elif session_token and session_token in web_sessions:
+                        user_info = web_sessions[session_token]
+
+                    if user_info:
+                        user_id = str(user_info.get('id'))
+                        active_websockets[user_id] = ws
+                        await ws.send_json({'type': 'auth_ok', 'payload': {'userId': user_id}})
+                        logger.info(f"WebSocket для користувача {user_id} аутентифіковано.")
+                    else:
+                        await ws.send_json({'type': 'error', 'payload': {'message': 'Authentication failed'}})
+                        await ws.close()
+                        return ws
+            except Exception as e:
+                logger.error(f"Помилка обробки WS повідомлення: {e}")
+
+    if user_id and user_id in active_websockets:
+        del active_websockets[user_id]
+    logger.info(f"WebSocket для користувача {user_id} закрито.")
+    return ws
 
 async def handle_api_init(request: web.Request) -> web.Response:
     data = await request.json()
-    init_data = data.get('initData', '')
-    user = get_user_from_init_data(init_data)
+    init_data, session_token = data.get('initData'), data.get('sessionToken')
+    
+    user = None
+    if init_data: user = get_user_from_init_data(init_data)
+    elif session_token and session_token in web_sessions: user = web_sessions[session_token]
+    
+    if not user: return web.json_response({'authStatus': 'required'})
 
-    if not user:
-        return web.json_response({'error': 'Invalid initData'}, status=400)
+    user_id_str = str(user['id'])
+    history = load_data(CONVERSATIONS_FILE, {}).get(user_id_str, [])
+    response_data = {'user': user, 'isAdmin': user['id'] in ADMIN_IDS, 'history': history}
+    if session_token: response_data['sessionToken'] = session_token
+    return web.json_response(response_data)
 
-    is_admin = user.get('id') in ADMIN_IDS
-    return web.json_response({'user': user, 'isAdmin': is_admin})
+async def handle_api_login(request: web.Request) -> web.Response:
+    data = await request.json()
+    name, user_class = data.get('name'), data.get('class')
+    if not name or not user_class: return web.json_response({'error': 'Name and class required'}, status=400)
+    
+    session_token, user_id = uuid.uuid4().hex, f"web-{uuid.uuid4().hex[:8]}"
+    user_data = {'id': user_id, 'first_name': name, 'username': f"{name} ({user_class})"}
+    web_sessions[session_token] = user_data
+    return web.json_response({'user': user_data, 'sessionToken': session_token})
 
 async def handle_send_message_web(request: web.Request) -> web.Response:
+    user = await get_user_context(request)
     data = await request.json()
     text = data.get('text')
-    init_data = data.get('initData', '')
-    user = get_user_from_init_data(init_data)
-
-    if not user or not text:
-        return web.json_response({'error': 'Missing user data or text'}, status=400)
-
-    ptb_app = request.app['ptb_app']
-    user_id = user.get('id')
-    user_name = user.get('first_name', 'WebApp User')
+    if not user or not text: return web.json_response({'error': 'Auth or text missing'}, status=400)
+    
+    user_id, user_name = str(user['id']), user.get('first_name', 'User')
+    
+    conversations = load_data(CONVERSATIONS_FILE, {})
+    if user_id not in conversations: conversations[user_id] = []
+    conversations[user_id].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
+    save_data(conversations, CONVERSATIONS_FILE)
 
     forward_text = (f"📩 **Нове звернення (з Web App)**\n\n"
                     f"**Від:** {user_name} (ID: {user_id})\n\n"
                     f"**Текст:**\n---\n{text}")
-
+    
     keyboard = [
         [InlineKeyboardButton("Відповісти за допомогою ШІ 🤖", callback_data=f"ai_reply:{user_id}")],
         [InlineKeyboardButton("Відповісти особисто ✍️", callback_data=f"manual_reply:{user_id}")]
@@ -120,63 +197,106 @@ async def handle_send_message_web(request: web.Request) -> web.Response:
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     for admin_id in ADMIN_IDS:
-        try:
-            await ptb_app.bot.send_message(chat_id=admin_id, text=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Web App: Не вдалося надіслати повідомлення адміну {admin_id}: {e}")
-
+        await request.app['ptb_app'].bot.send_message(chat_id=admin_id, text=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
     return web.json_response({'status': 'ok'})
 
 # --- Web App Admin Обробники ---
-async def handle_admin_action(request: web.Request, action: Callable):
-    data = await request.json()
-    init_data = data.get('initData', '')
-    user = get_user_from_init_data(init_data)
-    
+async def admin_action_wrapper(request: web.Request, action: Callable):
+    user = await get_user_context(request)
     if not user or user.get('id') not in ADMIN_IDS:
         return web.json_response({'error': 'Unauthorized'}, status=403)
-        
     return await action(request)
 
-async def get_stats_web(request: web.Request) -> web.Response:
-    ptb_app = request.app['ptb_app']
-    user_count = len(ptb_app.bot_data.get('user_ids', set()))
+async def get_stats_web(request: web.Request):
+    user_count = len(load_data('user_ids.json', []))
     return web.json_response({'user_count': user_count})
 
-async def get_kb_view_web(request: web.Request) -> web.Response:
-    kb = load_data('knowledge_base.json') or {}
-    return web.json_response(kb)
+async def get_kb_view_web(request: web.Request):
+    return web.json_response(load_data('knowledge_base.json', {}))
 
-async def broadcast_web(request: web.Request) -> web.Response:
+async def broadcast_web(request: web.Request):
     data = await request.json()
     message = data.get('message')
-    if not message:
-        return web.json_response({'error': 'Message is required'}, status=400)
+    if not message: return web.json_response({'error': 'Message required'}, status=400)
     
     ptb_app = request.app['ptb_app']
     success, fail = await do_broadcast(ptb_app, text_content=message)
     return web.json_response({'success': success, 'fail': fail})
+    
+async def get_conversations_web(request: web.Request):
+    conversations = load_data(CONVERSATIONS_FILE, {})
+    conv_list = []
+    for user_id, messages in conversations.items():
+        if messages:
+            user_name = f"User {user_id}"
+            if user_id.startswith('web-'):
+                for session in web_sessions.values():
+                    if str(session['id']) == user_id:
+                        user_name = session.get('first_name', user_name)
+                        break
+            
+            conv_list.append({
+                "user_id": user_id,
+                "user_name": user_name,
+                "last_message": messages[-1]['text'],
+                "timestamp": messages[-1]['timestamp']
+            })
+    conv_list.sort(key=lambda x: x['timestamp'], reverse=True)
+    return web.json_response({"conversations": conv_list[:10]})
+
+async def suggest_reply_web(request: web.Request):
+    data = await request.json()
+    user_id = data.get('user_id')
+    history = load_data(CONVERSATIONS_FILE, {}).get(str(user_id), [])
+    if not history: return web.json_response({"error": "No history found"}, status=404)
+    
+    history_text = "\n".join([f"{msg['sender']}: {msg['text']}" for msg in history[-5:]])
+    prompt = (
+        "Ти — помічник адміністратора шкільного чату. Проаналізуй історію переписки та запропонуй ввічливу та корисну відповідь від імені адміністратора. "
+        "Відповідь має бути короткою та по суті.\n\n"
+        f"ІСТОРІЯ:\n{history_text}\n\n"
+        "ЗАПРОПОНОВАНА ВІДПОВІДЬ:"
+    )
+    reply = await generate_text_with_fallback(prompt)
+    if not reply: return web.json_response({"error": "AI generation failed"}, status=500)
+    return web.json_response({"reply": reply})
+
+async def improve_text_web(request: web.Request):
+    data = await request.json()
+    text = data.get('text')
+    if not text: return web.json_response({"error": "Text is required"}, status=400)
+
+    prompt = (
+        "Перепиши цей текст, щоб він був більш цікавим, лаконічним та привабливим для оголошення в шкільному телеграм-каналі. "
+        "Збережи головну суть, але зроби стиль більш жвавим.\n\n"
+        f"ОРИГІНАЛЬНИЙ ТЕКСТ:\n{text}\n\n"
+        "ПОКРАЩЕНИЙ ТЕКСТ:"
+    )
+    improved_text = await generate_text_with_fallback(prompt)
+    if not improved_text: return web.json_response({"error": "AI generation failed"}, status=500)
+    return web.json_response({"improved_text": improved_text})
 
 # --- Інтеграція веб-сервера з ботом ---
 async def post_init(application: Application):
-    """Запускає веб-сервер після ініціалізації бота."""
     web_app = web.Application()
     web_app['ptb_app'] = application
-
-    # Налаштування маршрутів
-    web_app.router.add_get('/', handle_index)
-    web_app.router.add_post('/api/init', handle_api_init)
-    web_app.router.add_post('/api/sendMessage', handle_send_message_web)
-    web_app.router.add_post('/api/stats', lambda r: handle_admin_action(r, get_stats_web))
-    web_app.router.add_post('/api/kb/view', lambda r: handle_admin_action(r, get_kb_view_web))
-    web_app.router.add_post('/api/broadcast', lambda r: handle_admin_action(r, broadcast_web))
-
-    # Налаштування CORS
-    cors = aiohttp_cors.setup(web_app, defaults={
-        "*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")
-    })
-    for route in list(web_app.router.routes()):
-        cors.add(route)
+    routes = [
+        web.get('/', lambda r: web.FileResponse('./index.html')),
+        web.get('/ws', handle_websocket),
+        web.post('/api/init', handle_api_init),
+        web.post('/api/login', handle_api_login),
+        web.post('/api/sendMessage', handle_send_message_web),
+        web.post('/api/stats', lambda r: admin_action_wrapper(r, get_stats_web)),
+        web.post('/api/kb/view', lambda r: admin_action_wrapper(r, get_kb_view_web)),
+        web.post('/api/broadcast', lambda r: admin_action_wrapper(r, broadcast_web)),
+        web.post('/api/admin/conversations', lambda r: admin_action_wrapper(r, get_conversations_web)),
+        web.post('/api/admin/suggest_reply', lambda r: admin_action_wrapper(r, suggest_reply_web)),
+        web.post('/api/admin/improve_text', lambda r: admin_action_wrapper(r, improve_text_web)),
+    ]
+    web_app.add_routes(routes)
+    
+    cors = aiohttp_cors.setup(web_app, defaults={"*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")})
+    for route in list(web_app.router.routes()): cors.add(route)
 
     runner = web.AppRunner(web_app)
     await runner.setup()
@@ -187,13 +307,9 @@ async def post_init(application: Application):
     application.bot_data['_web_runner'] = runner
 
 async def post_shutdown(application: Application):
-    """Зупиняє веб-сервер."""
-    runner = application.bot_data.get('_web_runner')
-    if runner:
-        await runner.cleanup()
-        logger.info("Веб-сервер зупинено.")
+    if runner := application.bot_data.get('_web_runner'): await runner.cleanup()
 
-# --- Генерація тексту (без змін) ---
+# --- Генерація тексту ---
 async def generate_text_with_fallback(prompt: str) -> str | None:
     for api_key in GEMINI_API_KEYS:
         try:
@@ -233,7 +349,7 @@ async def generate_text_with_fallback(prompt: str) -> str | None:
         logger.error(f"Резервний варіант Cloudflare AI також не спрацював: {e}")
         return None
 
-# --- Стани для ConversationHandler (без змін) ---
+# --- Стани для ConversationHandler ---
 (SELECTING_CATEGORY, IN_CONVERSATION, WAITING_FOR_REPLY,
  WAITING_FOR_ANONYMOUS_MESSAGE, WAITING_FOR_ANONYMOUS_REPLY,
  WAITING_FOR_BROADCAST_MESSAGE, CONFIRMING_BROADCAST,
@@ -244,7 +360,7 @@ async def generate_text_with_fallback(prompt: str) -> str | None:
  WAITING_FOR_SCHEDULE_TEXT, WAITING_FOR_SCHEDULE_TIME, CONFIRMING_SCHEDULE_POST) = range(22)
 
 
-# --- Сповіщення для адмінів (без змін) ---
+# --- Сповіщення для адмінів ---
 def get_admin_name(admin_id: int) -> str:
     admin_contacts = load_data(ADMIN_CONTACTS_FILE)
     return admin_contacts.get(str(admin_id), f"Адміністратор {admin_id}")
@@ -260,7 +376,7 @@ async def notify_other_admins(context: ContextTypes.DEFAULT_TYPE, replying_admin
                 logger.warning(f"Не вдалося надіслати сповіщення адміну {admin_id}: {e}")
 
 
-# --- Універсальний розсильник (невелике оновлення для роботи з web app) ---
+# --- Універсальний розсильник ---
 async def do_broadcast(context: ContextTypes.DEFAULT_TYPE | Application, text_content: str, photo: bytes | str | None = None, video: str | None = None) -> tuple[int, int]:
     full_text_content = f"{text_content}"
     
@@ -291,9 +407,6 @@ async def do_broadcast(context: ContextTypes.DEFAULT_TYPE | Application, text_co
             fail += 1
     return success, fail
 
-# --- Решта коду бота залишається без змін ---
-# (generate_image, get_all_text_from_website, gather_all_context, check_website_for_updates, etc.)
-# ... (вставте сюди весь інший код з вашого original_main.py, починаючи з async def generate_image)
 async def generate_image(prompt: str) -> bytes | None:
     api_url = "https://api.stability.ai/v2beta/stable-image/generate/core"
     headers = {
@@ -953,6 +1066,16 @@ async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     message = update.message
     user_data = context.user_data
+    
+    # Збереження повідомлення в історію
+    user_id = update.effective_user.id
+    text = message.text or message.caption or ""
+    conversations = load_data(CONVERSATIONS_FILE, {})
+    user_id_str = str(user_id)
+    if user_id_str not in conversations: conversations[user_id_str] = []
+    conversations[user_id_str].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
+    save_data(conversations, CONVERSATIONS_FILE)
+
 
     user_data['user_info'] = {'id': update.effective_user.id, 'name': update.effective_user.full_name}
 
@@ -1019,6 +1142,16 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_info = context.user_data.get('user_info', {'id': update.effective_user.id, 'name': update.effective_user.full_name})
     category = context.user_data.get('category', 'Без категорії')
+    
+    # Збереження доповнення в історію
+    user_id = update.effective_user.id
+    text = update.message.text or update.message.caption or ""
+    conversations = load_data(CONVERSATIONS_FILE, {})
+    user_id_str = str(user_id)
+    if user_id_str not in conversations: conversations[user_id_str] = []
+    conversations[user_id_str].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
+    save_data(conversations, CONVERSATIONS_FILE)
+
 
     keyboard = [
         [InlineKeyboardButton("Відповісти за допомогою ШІ 🤖", callback_data=f"ai_reply:{user_info['id']}")],
@@ -1054,6 +1187,14 @@ async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAUL
         context.bot_data['anonymous_map'] = {}
     context.bot_data['anonymous_map'][anon_id] = user_id
     message_text = update.message.text
+    
+    # Збереження анонімного повідомлення в історію
+    user_id_str = str(user_id)
+    conversations = load_data(CONVERSATIONS_FILE, {})
+    if user_id_str not in conversations: conversations[user_id_str] = []
+    conversations[user_id_str].append({"sender": "user", "text": f"(Анонімно) {message_text}", "timestamp": datetime.now().isoformat()})
+    save_data(conversations, CONVERSATIONS_FILE)
+
 
     keyboard = [
         [InlineKeyboardButton("Відповісти з ШІ 🤖", callback_data=f"anon_ai_reply:{anon_id}")],
@@ -1111,7 +1252,7 @@ async def start_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await query.answer()
     action, target_user_id_str = query.data.split(':', 1)
 
-    context.chat_data['target_user_id'] = int(target_user_id_str)
+    context.chat_data['target_user_id'] = target_user_id_str
     original_text = query.message.text or query.message.caption or ""
 
     user_question_part = original_text.split('---\n')
@@ -1174,7 +1315,8 @@ async def send_ai_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
 
     try:
-        await context.bot.send_message(chat_id=target_user_id, text=ai_response_text)
+        target_user_id_typed = int(target_user_id) if str(target_user_id).isdigit() else target_user_id
+        await send_reply_to_user(context.application, target_user_id_typed, ai_response_text)
         await query.edit_message_text(text="✅ *Відповідь успішно надіслано.*", parse_mode='Markdown')
         await query.edit_message_reply_markup(reply_markup=None)
         await notify_other_admins(context, query.from_user.id, original_message)
@@ -1194,7 +1336,8 @@ async def receive_manual_reply(update: Update, context: ContextTypes.DEFAULT_TYP
 
     owner_reply_text = update.message.text
     try:
-        await context.bot.send_message(chat_id=target_user_id, text=f"✉️ **Відповідь від адміністратора:**\n\n{owner_reply_text}", parse_mode='Markdown')
+        target_user_id_typed = int(target_user_id) if str(target_user_id).isdigit() else target_user_id
+        await send_reply_to_user(context.application, target_user_id_typed, f"✉️ **Відповідь від адміністратора:**\n\n{owner_reply_text}")
         await update.message.reply_text("✅ Вашу відповідь надіслано.")
         await notify_other_admins(context, update.effective_user.id, original_message)
     except Exception as e:
@@ -1260,7 +1403,7 @@ async def send_anonymous_ai_reply_to_user(update: Update, context: ContextTypes.
         return ConversationHandler.END
 
     try:
-        await context.bot.send_message(chat_id=user_id, text=f"🤫 **Відповідь на ваше анонімне звернення (від ШІ):**\n\n{ai_response_text}", parse_mode='Markdown')
+        await send_reply_to_user(context.application, user_id, f"🤫 **Відповідь на ваше анонімне звернення (від ШІ):**\n\n{ai_response_text}")
         await query.edit_message_text(text="✅ *Відповідь аноніму успішно надіслано.*", parse_mode='Markdown')
         await query.edit_message_reply_markup(reply_markup=None)
         await notify_other_admins(context, query.from_user.id, original_message)
@@ -1294,7 +1437,7 @@ async def send_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TYP
         
     admin_reply_text = update.message.text
     try:
-        await context.bot.send_message(chat_id=user_id, text=f"🤫 **Відповідь на ваше анонімне звернення:**\n\n{admin_reply_text}", parse_mode='Markdown')
+        await send_reply_to_user(context.application, user_id, f"🤫 **Відповідь на ваше анонімне звернення:**\n\n{admin_reply_text}")
         await update.message.reply_text(f"✅ Вашу відповідь аноніму (ID: {anon_id}) надіслано.")
         await notify_other_admins(context, update.effective_user.id, original_message)
     except Exception as e:
@@ -1310,9 +1453,11 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
     text_to_scan = replied_message.text or replied_message.caption or ""
     original_message = text_to_scan.split('---\n')[-1].strip()
     
-    match = re.search(r"\(ID: (\d+)\)", text_to_scan)
+    match = re.search(r"\(ID: ([\w\-]+)\)", text_to_scan) # Змінено для підтримки web-id
     if match:
-        target_user_id = int(match.group(1))
+        target_user_id_str = match.group(1)
+        try: target_user_id = int(target_user_id_str)
+        except ValueError: target_user_id = target_user_id_str
         reply_intro = "✉️ **Відповідь від адміністратора:**"
     else:
         anon_match = re.search(r"\(ID: ([a-f0-9\-]+)\)", text_to_scan)
@@ -1324,12 +1469,19 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
     if not target_user_id: return
 
     try:
-        if update.message.text:
-            await context.bot.send_message(chat_id=target_user_id, text=f"{reply_intro}\n\n{update.message.text}", parse_mode='Markdown')
-        elif update.message.photo:
-            await context.bot.send_photo(chat_id=target_user_id, photo=update.message.photo[-1].file_id, caption=f"{reply_intro}\n\n{update.message.caption or ''}", parse_mode='Markdown')
-        elif update.message.video:
-            await context.bot.send_video(chat_id=target_user_id, video=update.message.video.file_id, caption=f"{reply_intro}\n\n{update.message.caption or ''}", parse_mode='Markdown')
+        reply_text = update.message.text or update.message.caption or ""
+        if update.message.photo or update.message.video:
+            # Пряма пересилка медіа через веб-інтерфейс/веб-сокет складна.
+            # Поки що надсилаємо лише текст, якщо це веб-користувач.
+            if isinstance(target_user_id, str) and target_user_id.startswith('web-'):
+                 await send_reply_to_user(context.application, target_user_id, f"{reply_intro}\n\n{reply_text}\n\n(Адміністратор також надіслав медіа, яке неможливо відобразити тут)")
+            else: # Це телеграм користувач
+                 if update.message.photo:
+                    await context.bot.send_photo(chat_id=target_user_id, photo=update.message.photo[-1].file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
+                 elif update.message.video:
+                    await context.bot.send_video(chat_id=target_user_id, video=update.message.video.file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
+        else: # Тільки текст
+            await send_reply_to_user(context.application, target_user_id, f"{reply_intro}\n\n{reply_text}")
 
         await update.message.reply_text("✅ Вашу відповідь надіслано.", quote=True)
         await notify_other_admins(context, update.effective_user.id, original_message)
@@ -1622,9 +1774,8 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
     
     return ConversationHandler.END
 
-# --- Основна функція запуску (ОНОВЛЕНО) ---
 def main() -> None:
-    raw = load_data('user_ids.json')
+    raw = load_data('user_ids.json', [])
     user_ids = set(raw) if isinstance(raw, list) else set()
 
     application = (
@@ -1638,7 +1789,7 @@ def main() -> None:
     application.bot_data['user_ids'] = user_ids
     application.bot_data['anonymous_map'] = {}
 
-    # --- Conversation Handlers (без змін) ---
+    # --- Conversation Handlers ---
     user_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND | filters.PHOTO | filters.VIDEO, start_conversation)],
         states={
@@ -1734,7 +1885,7 @@ def main() -> None:
         fallbacks=[CommandHandler('cancel', cancel)]
     )
 
-    # --- Реєстрація обробників (без змін) ---
+    # --- Реєстрація обробників ---
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancel", cancel))
     application.add_handler(CommandHandler("faq", faq_command))
@@ -1775,3 +1926,4 @@ def main() -> None:
 
 if __name__ == '__main__':
     main()
+
