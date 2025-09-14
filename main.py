@@ -30,6 +30,9 @@ GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.
 CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c6912fc52ccb303667c92687")
 CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "v6HjMgCHEqTiElwnW_hK73j1uqQKud1fG-rPInWD")
 STABILITY_AI_API_KEY = os.environ.get("STABILITY_AI_API_KEY", "sk-BteFBPcwTpG8FLgT1RRWXUQ3MxzqCJ4zEJxSm3pKn6lw0KRs")
+# ВАЖЛИВО: Ваша публічна URL-адреса на Render
+WEBHOOK_URL = f"https://gymnasiumaibot.onrender.com/{TELEGRAM_BOT_TOKEN}"
+
 
 ADMIN_IDS = [
     838464083,
@@ -111,6 +114,21 @@ async def send_reply_to_user(ptb_app: Application, user_id: str | int, text: str
              logger.error(f"Не вдалося надіслати в Telegram користувачу {user_id}: {e}")
 
 # --- Web App Обробники ---
+async def handle_telegram_webhook(request: web.Request) -> web.Response:
+    """Обробляє вхідні оновлення від Telegram."""
+    application = request.app['ptb_app']
+    try:
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return web.Response()
+    except json.JSONDecodeError:
+        logger.warning("Не вдалося розпарсити JSON з вебхука Telegram.")
+        return web.Response(status=400)
+    except Exception as e:
+        logger.error(f"Помилка в обробнику вебхука: {e}")
+        return web.Response(status=500)
+
 async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse()
     await ws.prepare(request)
@@ -283,6 +301,7 @@ async def post_init(application: Application):
     routes = [
         web.get('/', lambda r: web.FileResponse('./index.html')),
         web.get('/ws', handle_websocket),
+        web.post(f'/{TELEGRAM_BOT_TOKEN}', handle_telegram_webhook), # Маршрут для Telegram
         web.post('/api/init', handle_api_init),
         web.post('/api/login', handle_api_login),
         web.post('/api/sendMessage', handle_send_message_web),
@@ -306,8 +325,21 @@ async def post_init(application: Application):
     logger.info(f"Веб-сервер запущено на http://0.0.0.0:{port}")
     application.bot_data['_web_runner'] = runner
 
+    try:
+        await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+        logger.info(f"Вебхук успішно встановлено на {WEBHOOK_URL}")
+    except Exception as e:
+        logger.error(f"Не вдалося встановити вебхук: {e}")
+
 async def post_shutdown(application: Application):
-    if runner := application.bot_data.get('_web_runner'): await runner.cleanup()
+    if runner := application.bot_data.get('_web_runner'):
+        await runner.cleanup()
+        logger.info("Веб-сервер зупинено.")
+    try:
+        await application.bot.delete_webhook()
+        logger.info("Вебхук успішно видалено.")
+    except Exception as e:
+        logger.error(f"Не вдалося видалити вебхук: {e}")
 
 # --- Генерація тексту ---
 async def generate_text_with_fallback(prompt: str) -> str | None:
@@ -1453,7 +1485,7 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
     text_to_scan = replied_message.text or replied_message.caption or ""
     original_message = text_to_scan.split('---\n')[-1].strip()
     
-    match = re.search(r"\(ID: ([\w\-]+)\)", text_to_scan) # Змінено для підтримки web-id
+    match = re.search(r"\(ID: ([\w\-]+)\)", text_to_scan)
     if match:
         target_user_id_str = match.group(1)
         try: target_user_id = int(target_user_id_str)
@@ -1471,16 +1503,14 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
     try:
         reply_text = update.message.text or update.message.caption or ""
         if update.message.photo or update.message.video:
-            # Пряма пересилка медіа через веб-інтерфейс/веб-сокет складна.
-            # Поки що надсилаємо лише текст, якщо це веб-користувач.
             if isinstance(target_user_id, str) and target_user_id.startswith('web-'):
                  await send_reply_to_user(context.application, target_user_id, f"{reply_intro}\n\n{reply_text}\n\n(Адміністратор також надіслав медіа, яке неможливо відобразити тут)")
-            else: # Це телеграм користувач
+            else:
                  if update.message.photo:
                     await context.bot.send_photo(chat_id=target_user_id, photo=update.message.photo[-1].file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
                  elif update.message.video:
                     await context.bot.send_video(chat_id=target_user_id, video=update.message.video.file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
-        else: # Тільки текст
+        else:
             await send_reply_to_user(context.application, target_user_id, f"{reply_intro}\n\n{reply_text}")
 
         await update.message.reply_text("✅ Вашу відповідь надіслано.", quote=True)
@@ -1920,9 +1950,8 @@ def main() -> None:
     job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
     job_queue.run_once(notify_new_admins, 5)
 
-    logger.info("Планувальник завдань запущено.")
-    logger.info("Бот запущено...")
-    application.run_polling()
+    logger.info("Бот запускається в режимі вебхука...")
+    application.run_asyncio()
 
 if __name__ == '__main__':
     main()
