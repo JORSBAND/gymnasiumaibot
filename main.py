@@ -294,53 +294,6 @@ async def improve_text_web(request: web.Request):
     if not improved_text: return web.json_response({"error": "AI generation failed"}, status=500)
     return web.json_response({"improved_text": improved_text})
 
-# --- Інтеграція веб-сервера з ботом ---
-async def post_init(application: Application):
-    web_app = web.Application()
-    web_app['ptb_app'] = application
-    routes = [
-        web.get('/', lambda r: web.FileResponse('./index.html')),
-        web.get('/ws', handle_websocket),
-        web.post(f'/{TELEGRAM_BOT_TOKEN}', handle_telegram_webhook), # Маршрут для Telegram
-        web.post('/api/init', handle_api_init),
-        web.post('/api/login', handle_api_login),
-        web.post('/api/sendMessage', handle_send_message_web),
-        web.post('/api/stats', lambda r: admin_action_wrapper(r, get_stats_web)),
-        web.post('/api/kb/view', lambda r: admin_action_wrapper(r, get_kb_view_web)),
-        web.post('/api/broadcast', lambda r: admin_action_wrapper(r, broadcast_web)),
-        web.post('/api/admin/conversations', lambda r: admin_action_wrapper(r, get_conversations_web)),
-        web.post('/api/admin/suggest_reply', lambda r: admin_action_wrapper(r, suggest_reply_web)),
-        web.post('/api/admin/improve_text', lambda r: admin_action_wrapper(r, improve_text_web)),
-    ]
-    web_app.add_routes(routes)
-    
-    cors = aiohttp_cors.setup(web_app, defaults={"*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")})
-    for route in list(web_app.router.routes()): cors.add(route)
-
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info(f"Веб-сервер запущено на http://0.0.0.0:{port}")
-    application.bot_data['_web_runner'] = runner
-
-    try:
-        await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-        logger.info(f"Вебхук успішно встановлено на {WEBHOOK_URL}")
-    except Exception as e:
-        logger.error(f"Не вдалося встановити вебхук: {e}")
-
-async def post_shutdown(application: Application):
-    if runner := application.bot_data.get('_web_runner'):
-        await runner.cleanup()
-        logger.info("Веб-сервер зупинено.")
-    try:
-        await application.bot.delete_webhook()
-        logger.info("Вебхук успішно видалено.")
-    except Exception as e:
-        logger.error(f"Не вдалося видалити вебхук: {e}")
-
 # --- Генерація тексту ---
 async def generate_text_with_fallback(prompt: str) -> str | None:
     for api_key in GEMINI_API_KEYS:
@@ -1804,22 +1757,15 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
     
     return ConversationHandler.END
 
-def main() -> None:
-    raw = load_data('user_ids.json', [])
-    user_ids = set(raw) if isinstance(raw, list) else set()
+async def main() -> None:
+    # --- Створення та налаштування Application ---
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    application = (
-        Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
-    )
-
-    application.bot_data['user_ids'] = user_ids
+    # --- Налаштування даних бота та обробників (без змін) ---
+    raw_user_ids = load_data('user_ids.json', [])
+    application.bot_data['user_ids'] = set(raw_user_ids)
     application.bot_data['anonymous_map'] = {}
 
-    # --- Conversation Handlers ---
     user_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND | filters.PHOTO | filters.VIDEO, start_conversation)],
         states={
@@ -1914,8 +1860,7 @@ def main() -> None:
         },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
-
-    # --- Реєстрація обробників ---
+    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("cancel", cancel))
     application.add_handler(CommandHandler("faq", faq_command))
@@ -1943,16 +1888,66 @@ def main() -> None:
     application.add_handler(schedule_news_conv)
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
     application.add_handler(user_conv)
-    
-    # --- Запуск ---
-    job_queue = application.job_queue
-    kyiv_timezone = pytz.timezone("Europe/Kyiv")
-    job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
-    job_queue.run_once(notify_new_admins, 5)
 
-    logger.info("Бот запускається в режимі вебхука...")
-    application.run_asyncio()
+    # --- Запуск JobQueue та веб-сервера ---
+    await application.initialize()
+    
+    # Налаштування та запуск веб-сервера aiohttp
+    web_app = web.Application()
+    web_app['ptb_app'] = application
+    routes = [
+        web.get('/', lambda r: web.FileResponse('./index.html')),
+        web.get('/ws', handle_websocket),
+        web.post(f'/{TELEGRAM_BOT_TOKEN}', handle_telegram_webhook),
+        web.post('/api/init', handle_api_init),
+        web.post('/api/login', handle_api_login),
+        web.post('/api/sendMessage', handle_send_message_web),
+        web.post('/api/stats', lambda r: admin_action_wrapper(r, get_stats_web)),
+        web.post('/api/kb/view', lambda r: admin_action_wrapper(r, get_kb_view_web)),
+        web.post('/api/broadcast', lambda r: admin_action_wrapper(r, broadcast_web)),
+        web.post('/api/admin/conversations', lambda r: admin_action_wrapper(r, get_conversations_web)),
+        web.post('/api/admin/suggest_reply', lambda r: admin_action_wrapper(r, suggest_reply_web)),
+        web.post('/api/admin/improve_text', lambda r: admin_action_wrapper(r, improve_text_web)),
+    ]
+    web_app.add_routes(routes)
+    cors = aiohttp_cors.setup(web_app, defaults={"*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")})
+    for route in list(web_app.router.routes()): cors.add(route)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+
+    # Запускаємо фонові задачі (JobQueue)
+    await application.start()
+    
+    # Встановлюємо вебхук та запускаємо веб-сервер
+    try:
+        await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+        logger.info(f"Вебхук успішно встановлено на {WEBHOOK_URL}")
+        await site.start()
+        logger.info(f"Веб-сервер запущено на http://0.0.0.0:{port}")
+        
+        # Додаємо заплановані задачі
+        kyiv_timezone = pytz.timezone("Europe/Kyiv")
+        application.job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
+        application.job_queue.run_once(notify_new_admins, 5)
+        
+        # Головний цикл для підтримки роботи
+        while True:
+            await asyncio.sleep(3600)
+    finally:
+        # Коректне завершення роботи
+        await application.stop()
+        await runner.cleanup()
+        logger.info("Веб-сервер та фонові задачі зупинено.")
+        await application.bot.delete_webhook()
+        logger.info("Вебхук видалено.")
+        await application.shutdown()
+        logger.info("Додаток повністю зупинено.")
 
 if __name__ == '__main__':
-    main()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот зупинено вручну.")
 
