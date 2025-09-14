@@ -1,5 +1,6 @@
-python-telegram-bot
+python-telegram-bot[job-queue]
 google-generativeai
 requests
 beautifulsoup4
 pytz
+
