@@ -38,6 +38,7 @@ ADMIN_IDS = [
     838464083,
     6484405296,
     1374181841,
+    5268287971,
 ]
 GYMNASIUM_URL = "https://brodygymnasium.e-schools.info"
 TARGET_CHANNEL_ID = -1002946740131
@@ -1950,4 +1951,5 @@ if __name__ == '__main__':
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот зупинено вручну.")
+
 
