@@ -90,9 +90,23 @@
         </footer>
     </div>
     
-    <script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, doc, getDoc, addDoc, setDoc, updateDoc, deleteDoc, onSnapshot, collection, query, where, addDoc, getDocs } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        
         const tg = window.Telegram.WebApp;
 
+        const firebaseConfig = {
+            // ДОДАЙТЕ ВАШУ КОНФІГУРАЦІЮ FIREBASE WEB APP ТУТ
+        };
+        const __app_id = "default-app-id";
+        const __initial_auth_token = ""; // This will be provided by the environment
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        
         const elements = {
             loaderScreen: document.getElementById('loader-screen'),
             loginModal: document.getElementById('login-modal'),
