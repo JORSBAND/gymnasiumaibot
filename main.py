@@ -25,7 +25,7 @@ import aiohttp_cors
 
 # --- Налаштування ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8223675237:AAF_kmo6SP4XZS23NeXWFxgkQNUaEZOWNx0")
-GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEcX6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyBtIxTceQYA6UAUyr9R0RrWQQzFNEnWXYA")
+GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEcX6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyBtIxTceQYA6UAUyr9R0RrQWQzFNEnWXYA")
 GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.strip()]
 CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c6912fc52ccb303667c92687")
 CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "v6HjMgCHEqTiElwnW_hK73j1uqQKud1fG-rPInWD")
@@ -42,10 +42,10 @@ ADMIN_IDS = [
 ]
 GYMNASIUM_URL = "https://brodygymnasium.e-schools.info"
 TARGET_CHANNEL_ID = -1002946740131
-ADMIN_NOTIFIED_FILE = 'admin_notified.json' # Новий файл для відстеження привітань
+NOTIFIED_ADMINS_FILE = 'notified_admins.json'
 ADMIN_CONTACTS_FILE = 'admin_contacts.json'
 CONVERSATIONS_FILE = 'conversations.json'
-
+SCHEDULED_POSTS_FILE = 'scheduled_posts.json'
 # --- Кінець налаштувань ---
 
 # Логування
@@ -64,7 +64,7 @@ def load_data(filename: str, default_type: Any = None) -> Any:
     except (FileNotFoundError, json.JSONDecodeError):
         if default_type is not None:
             return default_type
-        if 'user_ids' in filename or 'admin_notified' in filename: return []
+        if 'user_ids' in filename or 'notified_admins' in filename: return []
         return {}
 
 def save_data(data: Any, filename: str) -> None:
@@ -89,9 +89,18 @@ async def get_user_context(request: web.Request) -> dict | None:
     init_data = data.get('initData')
     session_token = data.get('sessionToken')
     
-    if init_data: return get_user_from_init_data(init_data)
-    if session_token and session_token in web_sessions: return web_sessions[session_token]
-    return None
+    user_info = None
+    if init_data: user_info = get_user_from_init_data(init_data)
+    elif session_token and session_token in web_sessions: user_info = web_sessions[session_token]
+    
+    if not user_info:
+        raise web.HTTPUnauthorized()
+
+    user_id_str = str(user_info.get('id'))
+    if user_id_str not in ADMIN_IDS and user_id_str not in web_sessions:
+        raise web.HTTPForbidden()
+        
+    return user_info
 
 async def send_reply_to_user(ptb_app: Application, user_id: str | int, text: str):
     conversations = load_data(CONVERSATIONS_FILE, {})
@@ -178,7 +187,7 @@ async def handle_api_init(request: web.Request) -> web.Response:
 
     user_id_str = str(user['id'])
     history = load_data(CONVERSATIONS_FILE, {}).get(user_id_str, [])
-    response_data = {'user': user, 'isAdmin': user['id'] in ADMIN_IDS, 'history': history}
+    response_data = {'user': user, 'isAdmin': user.get('id') in ADMIN_IDS, 'history': history}
     if session_token: response_data['sessionToken'] = session_token
     return web.json_response(response_data)
 
@@ -221,9 +230,13 @@ async def handle_send_message_web(request: web.Request) -> web.Response:
 
 # --- Web App Admin Обробники ---
 async def admin_action_wrapper(request: web.Request, action: Callable):
-    user = await get_user_context(request)
-    if not user or user.get('id') not in ADMIN_IDS:
+    user = None
+    try:
+        user = await get_user_context(request)
+    except (web.HTTPUnauthorized, web.HTTPForbidden):
         return web.json_response({'error': 'Unauthorized'}, status=403)
+    if user.get('id') not in ADMIN_IDS:
+         return web.json_response({'error': 'Unauthorized'}, status=403)
     return await action(request)
 
 async def get_stats_web(request: web.Request):
@@ -232,6 +245,41 @@ async def get_stats_web(request: web.Request):
 
 async def get_kb_view_web(request: web.Request):
     return web.json_response(load_data('knowledge_base.json', {}))
+
+async def add_kb_entry_web(request: web.Request):
+    data = await request.json()
+    key = data.get('key')
+    value = data.get('value')
+    if not key or not value: return web.json_response({'error': 'Key and value required'}, status=400)
+    
+    kb = load_data('knowledge_base.json', {}) or {}
+    if not isinstance(kb, dict): kb = {}
+    kb[key] = value
+    save_data(kb, 'knowledge_base.json')
+    return web.json_response({'status': 'ok'})
+
+async def edit_kb_entry_web(request: web.Request):
+    data = await request.json()
+    key = data.get('key')
+    value = data.get('value')
+    if not key or not value: return web.json_response({'error': 'Key and value required'}, status=400)
+
+    kb = load_data('knowledge_base.json', {}) or {}
+    if not isinstance(kb, dict) or key not in kb: return web.json_response({'error': 'Key not found'}, status=404)
+    kb[key] = value
+    save_data(kb, 'knowledge_base.json')
+    return web.json_response({'status': 'ok'})
+
+async def delete_kb_entry_web(request: web.Request):
+    data = await request.json()
+    key = data.get('key')
+    if not key: return web.json_response({'error': 'Key required'}, status=400)
+
+    kb = load_data('knowledge_base.json', {}) or {}
+    if not isinstance(kb, dict) or key not in kb: return web.json_response({'error': 'Key not found'}, status=404)
+    del kb[key]
+    save_data(kb, 'knowledge_base.json')
+    return web.json_response({'status': 'ok'})
 
 async def broadcast_web(request: web.Request):
     data = await request.json()
@@ -294,6 +342,101 @@ async def improve_text_web(request: web.Request):
     improved_text = await generate_text_with_fallback(prompt)
     if not improved_text: return web.json_response({"error": "AI generation failed"}, status=500)
     return web.json_response({"improved_text": improved_text})
+
+async def create_news_post_web(request: web.Request):
+    data = await request.json()
+    text = data.get('text')
+    if not text: return web.json_response({"error": "Text is required"}, status=400)
+    
+    try:
+        summary_prompt = f"Перепиши цей текст, щоб він був цікавим та лаконічним постом для телеграм-каналу новин. Збережи головну суть. Текст:\n\n{text}"
+        processed_text = await generate_text_with_fallback(summary_prompt)
+        if not processed_text:
+            raise ValueError("Не вдалося обробити текст. Усі системи ШІ недоступні.")
+        
+        image_prompt_for_ai = f"Створи короткий опис (3-7 слів) англійською мовою для генерації зображення на основі цього тексту: {processed_text[:300]}"
+        image_prompt = await generate_text_with_fallback(image_prompt_for_ai)
+        image_bytes = await generate_image(image_prompt.strip() if image_prompt else "school news")
+        
+        image_url = f"data:image/jpeg;base64,{image_bytes.decode('utf-8')}"
+        
+        return web.json_response({'text': processed_text, 'image_url': image_url})
+    except Exception as e:
+        logger.error(f"Помилка при створенні новини через ШІ: {e}")
+        return web.json_response({'error': str(e)}, status=500)
+
+async def generate_site_post_web(request: web.Request):
+    try:
+        site_text = await asyncio.to_thread(get_all_text_from_website)
+        if not site_text:
+            raise ValueError("Не вдалося отримати дані з сайту.")
+
+        summary_prompt = (
+            "Проаналізуй наступний текст з веб-сайту. Створи з нього короткий, цікавий та інформативний пост для телеграм-каналу. "
+            "Виділи найголовнішу думку або новину. Пост має бути написаний українською мовою.\n\n"
+            f"--- ТЕКСТ З САЙТУ ---\n{site_text[:2500]}\n\n"
+            "--- ПОСТ ДЛЯ ТЕЛЕГРАМ-КАНАЛУ ---"
+        )
+        post_text = await generate_text_with_fallback(summary_prompt)
+        if not post_text:
+            raise ValueError("Не вдалося згенерувати текст поста. Усі системи ШІ недоступні.")
+        
+        image_prompt_for_ai = (
+            "На основі цього тексту, створи короткий опис (3-7 слів) англійською мовою для генерації зображення. Опис має бути символічним та мінімалістичним.\n\n"
+            f"Текст: {post_text[:300]}"
+        )
+        image_prompt = await generate_text_with_fallback(image_prompt_for_ai)
+        image_bytes = await generate_image(image_prompt.strip() if image_prompt else "school news")
+        image_url = f"data:image/jpeg;base64,{image_bytes.decode('utf-8')}"
+
+        return web.json_response({'text': post_text, 'image_url': image_url})
+    except Exception as e:
+        logger.error(f"Помилка при створенні поста з сайту: {e}")
+        return web.json_response({'error': str(e)}, status=500)
+
+async def schedule_news_web(request: web.Request):
+    data = await request.json()
+    text = data.get('text')
+    datetime_str = data.get('datetime')
+    
+    if not text or not datetime_str: return web.json_response({'error': 'Text and datetime required'}, status=400)
+
+    try:
+        kyiv_timezone = pytz.timezone("Europe/Kyiv")
+        schedule_time = datetime.fromisoformat(datetime_str)
+        schedule_time_aware = kyiv_timezone.localize(schedule_time)
+        
+        if schedule_time_aware < datetime.now(kyiv_timezone):
+            return web.json_response({'error': 'Scheduled time is in the past'}, status=400)
+
+        job_id = f"scheduled_post_{uuid.uuid4().hex[:10]}"
+        
+        scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
+        scheduled_posts.append({'id': job_id, 'text': text, 'time': schedule_time_aware.isoformat()})
+        save_data(scheduled_posts, SCHEDULED_POSTS_FILE)
+
+        request.app['ptb_app'].job_queue.run_once(scheduled_broadcast_job, when=schedule_time_aware, data={'text': text}, name=job_id)
+
+        return web.json_response({'status': 'ok', 'job_id': job_id})
+    except ValueError:
+        return web.json_response({'error': 'Invalid datetime format'}, status=400)
+
+async def view_scheduled_web(request: web.Request):
+    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
+    return web.json_response(scheduled_posts)
+
+async def cancel_scheduled_web(request: web.Request):
+    data = await request.json()
+    post_id = data.get('postId')
+    if not post_id: return web.json_response({'error': 'Post ID required'}, status=400)
+    
+    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
+    updated_list = [p for p in scheduled_posts if p['id'] != post_id]
+    save_data(updated_list, SCHEDULED_POSTS_FILE)
+
+    remove_job_if_exists(post_id, request.app['ptb_app'])
+    
+    return web.json_response({'status': 'ok'})
 
 # --- Генерація тексту ---
 async def generate_text_with_fallback(prompt: str) -> str | None:
@@ -799,6 +942,10 @@ async def scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         photo=job_data.get('photo'),
         video=job_data.get('video')
     )
+    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
+    updated_posts = [p for p in scheduled_posts if p.get('id') != context.job.name]
+    save_data(updated_posts, SCHEDULED_POSTS_FILE)
+
 def remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
     current_jobs = context.job_queue.get_jobs_by_name(name)
     if not current_jobs:
@@ -879,6 +1026,11 @@ async def confirm_schedule_post(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
 
     job_id = f"scheduled_post_{uuid.uuid4().hex[:10]}"
+    
+    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
+    scheduled_posts.append({'id': job_id, 'text': post_data['text'], 'time': schedule_time.isoformat()})
+    save_data(scheduled_posts, SCHEDULED_POSTS_FILE)
+
     context.job_queue.run_once(scheduled_broadcast_job, when=schedule_time, data=post_data, name=job_id)
 
     time_str = context.chat_data.get('schedule_time_str', 'невідомий час')
@@ -896,8 +1048,7 @@ async def view_scheduled_posts(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     
-    jobs = context.job_queue.jobs()
-    scheduled_posts = [j for j in jobs if j.name and j.name.startswith("scheduled_post_")]
+    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
     
     if not scheduled_posts:
         await query.edit_message_text("Немає запланованих постів.")
@@ -906,16 +1057,16 @@ async def view_scheduled_posts(update: Update, context: ContextTypes.DEFAULT_TYP
     await query.edit_message_text("**Список запланованих постів:**", parse_mode='Markdown')
     kyiv_timezone = pytz.timezone("Europe/Kyiv")
 
-    for job in scheduled_posts:
-        run_time = job.next_t.astimezone(kyiv_timezone).strftime("%d.%m.%Y о %H:%M")
-        text = job.data.get('text', '')[:200]
+    for post in scheduled_posts:
+        run_time = datetime.fromisoformat(post['time']).astimezone(kyiv_timezone).strftime("%d.%m.%Y о %H:%M")
+        text = post.get('text', '')[:200]
         
         message = (
             f"🗓️ **Час відправки:** {run_time}\n\n"
             f"**Текст:**\n_{text}..._"
         )
         
-        keyboard = [[InlineKeyboardButton("Скасувати розсилку ❌", callback_data=f"cancel_job:{job.name}")]]
+        keyboard = [[InlineKeyboardButton("Скасувати розсилку ❌", callback_data=f"cancel_job:{post['id']}")]]
         
         await query.message.reply_text(
             message,
@@ -929,6 +1080,10 @@ async def cancel_scheduled_job_button(update: Update, context: ContextTypes.DEFA
     
     job_name = query.data.split(':', 1)[1]
     
+    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
+    updated_list = [p for p in scheduled_posts if p['id'] != job_name]
+    save_data(updated_list, SCHEDULED_POSTS_FILE)
+
     if remove_job_if_exists(job_name, context):
         await query.edit_message_text("✅ Заплановану розсилку скасовано.")
     else:
@@ -1691,7 +1846,7 @@ async def receive_test_message(update: Update, context: ContextTypes.DEFAULT_TYP
     context.chat_data.clear()
     return ConversationHandler.END
 async def notify_new_admins(application: Application) -> None:
-    notified_admins = load_data(ADMIN_NOTIFIED_FILE, [])
+    notified_admins = load_data('admin_notified.json', [])
     if not isinstance(notified_admins, list):
         notified_admins = []
 
@@ -1712,17 +1867,15 @@ async def notify_new_admins(application: Application) -> None:
 
     if newly_notified:
         all_notified = notified_admins + newly_notified
-        save_data(all_notified, ADMIN_NOTIFIED_FILE)
+        save_data(all_notified, 'admin_notified.json')
 async def admin_command_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler: Callable) -> int:
     user_id = update.effective_user.id
     admin_contacts = load_data(ADMIN_CONTACTS_FILE)
 
     if str(user_id) in admin_contacts:
-        # Якщо контакт вже є, просто виконуємо команду.
         await command_handler(update, context)
         return ConversationHandler.END
     else:
-        # Якщо контакту немає, просимо його.
         context.chat_data['next_step_handler'] = command_handler.__name__
         keyboard = [[KeyboardButton("Надіслати мій контакт 👤", request_contact=True)]]
         await update.message.reply_text(
@@ -1735,16 +1888,11 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
     contact = update.message.contact
     user_id = contact.user_id
 
-    # Перевіряємо, чи користувач, що надіслав контакт, є в списку ADMIN_IDS
-    if user_id not in ADMIN_IDS:
-        await update.message.reply_text("Ви не є адміністратором цього бота.", reply_markup=ReplyKeyboardRemove())
-        return ConversationHandler.END
-
     admin_contacts = load_data(ADMIN_CONTACTS_FILE)
     if not isinstance(admin_contacts, dict):
         admin_contacts = {}
         
-    admin_contacts[str(user_id)] = contact.first_name or "Невідоме ім'я" # Зберігаємо ім'я
+    admin_contacts[str(user_id)] = contact.first_name
     save_data(admin_contacts, ADMIN_CONTACTS_FILE)
 
     await update.message.reply_text(f"✅ Дякую, {contact.first_name}! Ваш контакт збережено.", reply_markup=ReplyKeyboardRemove())
@@ -1758,7 +1906,10 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
         }
         handler_to_call = handler_map.get(next_handler_name)
         if handler_to_call:
-            await handler_to_call(update, context)
+            if handler_to_call == test_message_command:
+                return await test_message_command(update, context)
+            else:
+                await handler_to_call(update, context)
     
     return ConversationHandler.END
 
@@ -1817,7 +1968,7 @@ async def main() -> None:
         entry_points=[
             CallbackQueryHandler(start_admin_reply, pattern='^ai_reply:.*$'),
             CallbackQueryHandler(start_admin_reply, pattern='^manual_reply:.*$'),
-            CallbackQueryHandler(start_anonymous_ai_reply, pattern='^anon_ai_reply:.*$')
+            CallbackQueryHandler(start_anonymous_ai_reply, pattern='^anon_ai_reply:.*')
         ],
         states={
             WAITING_FOR_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_manual_reply)],
@@ -1857,7 +2008,7 @@ async def main() -> None:
             CommandHandler("testm", lambda u, c: admin_command_entry(u, c, command_handler=test_message_command)),
         ],
         states={
-            WAITING_FOR_ADMIN_CONTACT: [MessageHandler(filters.CONTACT, receive_admin_contact)],
+            WAITING_FOR_ADMIN_CONTACT: [MessageHandler(filters.CONTACT & filters.User(ADMIN_IDS), receive_admin_contact)],
             SELECTING_TEST_USER: [CallbackQueryHandler(handle_test_user_choice, pattern='^test_user_.*$')],
             WAITING_FOR_TEST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_test_name)],
             WAITING_FOR_TEST_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_test_id)],
@@ -1909,10 +2060,18 @@ async def main() -> None:
         web.post('/api/sendMessage', handle_send_message_web),
         web.post('/api/stats', lambda r: admin_action_wrapper(r, get_stats_web)),
         web.post('/api/kb/view', lambda r: admin_action_wrapper(r, get_kb_view_web)),
+        web.post('/api/admin/kb/add', lambda r: admin_action_wrapper(r, add_kb_entry_web)),
+        web.post('/api/admin/kb/edit', lambda r: admin_action_wrapper(r, edit_kb_entry_web)),
+        web.post('/api/admin/kb/delete', lambda r: admin_action_wrapper(r, delete_kb_entry_web)),
         web.post('/api/broadcast', lambda r: admin_action_wrapper(r, broadcast_web)),
         web.post('/api/admin/conversations', lambda r: admin_action_wrapper(r, get_conversations_web)),
         web.post('/api/admin/suggest_reply', lambda r: admin_action_wrapper(r, suggest_reply_web)),
         web.post('/api/admin/improve_text', lambda r: admin_action_wrapper(r, improve_text_web)),
+        web.post('/api/admin/create_news_post', lambda r: admin_action_wrapper(r, create_news_post_web)),
+        web.post('/api/admin/generate_site_post', lambda r: admin_action_wrapper(r, generate_site_post_web)),
+        web.post('/api/admin/schedule_news', lambda r: admin_action_wrapper(r, schedule_news_web)),
+        web.post('/api/admin/view_scheduled', lambda r: admin_action_wrapper(r, view_scheduled_web)),
+        web.post('/api/admin/cancel_scheduled', lambda r: admin_action_wrapper(r, cancel_scheduled_web)),
     ]
     web_app.add_routes(routes)
     cors = aiohttp_cors.setup(web_app, defaults={"*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")})
