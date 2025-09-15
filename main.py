@@ -29,7 +29,7 @@ GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zelo
 GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.strip()]
 CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c6912fc52ccb303667c92687")
 CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "v6HjMgCHEqTiElwnW_hK73j1uqQKud1fG-rPInWD")
-STABILITY_AI_API_KEY = os.environ.get("STABILITY_AI_API_KEY", "sk-BteFBPcwTpG8FLgT1RRWXUQ3MxzqCJ4zEJxSm3pKn6lw0KRs")
+STABILITY_AI_API_KEY = os.environ.get("STABILITY_AI_API_KEY", "sk-uDtr8UAPxC7JHLG9QAyXt9s4QY142fkbOQA7uZZEgjf99iWp")
 # ВАЖЛИВО: Ваша публічна URL-адреса на Render
 WEBHOOK_URL = f"https://gymnasiumaibot.onrender.com/{TELEGRAM_BOT_TOKEN}"
 
@@ -1951,5 +1951,6 @@ if __name__ == '__main__':
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот зупинено вручну.")
+
 
 
