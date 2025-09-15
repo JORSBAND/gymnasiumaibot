@@ -10,7 +10,8 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes,
     CallbackQueryHandler, ConversationHandler
 )
-# Не забудьте встановити: pip install python-telegram-bot google-generativeai requests beautifulsoup4 pytz aiohttp aiohttp_cors
+# Щоб уникнути помилки ModuleNotFoundError, переконайтеся, що ви встановили ці бібліотеки:
+# pip install python-telegram-bot google-generativeai requests beautifulsoup4 pytz firebase-admin aiohttp aiohttp-cors
 import requests
 from bs4 import BeautifulSoup
 import pytz
@@ -19,9 +20,32 @@ import re
 import hashlib
 from urllib.parse import parse_qs
 
-# --- Веб-сервер імпорти ---
+# Firebase Imports
+from firebase_admin import credentials, firestore, initialize_app
+from firebase_admin.exceptions import FirebaseError
+
+# Web Server Imports
 from aiohttp import web, WSMsgType
 import aiohttp_cors
+
+# Global Firebase and App config
+__app_id = os.environ.get("APP_ID", "default-app-id")
+__firebase_config = os.environ.get("FIREBASE_CONFIG", "{}")
+try:
+    # ДОДАЙТЕ ВАШУ КОНФІГУРАЦІЮ FIREBASE ADMIN SDK JSON ТУТ
+    # ЗАМІНІТЬ ЦЕЙ ПЛЕЙСХОЛДЕР ВМІСТОМ ВАШОГО JSON-ФАЙЛУ
+    firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS", """
+    {
+        "type": "service_account",
+        "project_id": "gymnasiumaibot",
+        "private_key_id": "408836146185affa7bb56379a3ebaf74c63dc304",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDToBcIvZg5xiot\n+y0I6FpqXrNJedX2GyI7XdhtoPFpkZgpvaRlZxCJ2O3SLtKjhN3SBOt97mRKWTU6\nLGOaXP1FZ4nU5nsjZbnQbT78E7vTarFsvnnJnfpK6GHO8s/SEXWRVm7C5x8HHOGS\nemjMYqhr+r33DQLP/UQ6RmlZ+TUMT56GB39Gxa1AQ4bO136r4NReKc2+/NEyaaOu\nePLKGnrvHNG8gbinlmw78Zq1NanwB2Ljq11J+3un+MNllgT2tN82cRKL7Md1LHj6\n3lsqtBMMpYMhD6Xb2AGIYNkjFXGvVmbKzsXBfuQm3fNJphKgoLEm6hhXrIfyJL/L\nM9vgBF4XAgMBAAECggEAWP00Qm4rgXvlh8Fb7id6wckBvk933A4L5ofvdyYa7ggV\nwtOmuidNSpIIa35Z//3ioyqDdkiVLrh1i/lXhvU8YX+I85hZxohDyzPtLOYFcQEo\nC7DLGK+QLQir/HCZWF4UIKIGYHn8z6pi5owH3o5MAWAGmskDWj/HfXPXYEjNeFeM\n5Przbt74U7vO+fAvOsYezJInHRDOg8Lc+5LU3jdjuB5KNZmI2FsO7gTzISjkz/Cr\npJwRx1McLnocpzJDVsiaQYZL0nvMS4PDxeAb+u7AluWpdr6KJPBODYqxpbVVwRkc\nen/k9jhRljMl3h/9HFQGuLW1fZxdsnaXWTbTe3FLZQKBgQDuKYnoB6lIMpESCKFj\njkL/5YDpXRaszQGhMTKCOHUmv2IMeHqZiRLDnhqh0ivotqi55EohNRfSy9cB+5cR\nONjl5yYJiODo0lGZoukM4b+9uGlC1++NICk3AMjC86AyCbyXnqaJfzvgNZ11n3qE\nnu62fhxBuA8caGezyphUwBlA5QKBgQDjeb1On8uP0dcMrP1EgTMUuU38KmyBxsc2\nu66+2YPVBlTjBT5dn5vn4q3valZEQGunt7qv9SrSCeb9cYfD2Z3IDBf2wXn8yVJP\n3SsWdKnIFom2I+crAWUgd3hcocXNKBDpZS5Pm4GkJpDbXRkP5ql5a111dqLpburg\npp/zzq4/SwKBgCUFCe2qOzMAwTIHa2a5N0rllrsvgBXOLAGtTweU1Qj32LrNg2kY\nOHV1vvgGXlLnCaUTij5NLW3Tx5EEVYAU0QozeuMihqtJ/eseupEJCi/oWVxNimvq\nYt2s3ogHLJB6mPkMbSCUSW9ZhidBad7xgXOWeLfyb07gH7Z/uFv8HDDNAoGAQ7qG\nk/deC6dF6V9EVXZGeEAoKRGUlxtRS0mcYPSwnOeytJlmFUglimhis2ss3kt0Ak7h\nBezwX/NU1FdOPhD4OoznQbAfmxVyLZdDcf8wYgPb4uBTvuk+a+lGbAY6t7fbOTLI\nFCnP8skMzlOs16AtC5rdC9FT9j7xLgxOibAbD3sCgYA2n8BpAtLdgfPbV68thSCT\nopNttXwT+DyIS8JatM0M/3czatfTIabs7HugVAwKygcMW7EsYMMJaFRcGrfeiDfz\nbtZxPpMOq3Rah/ouf06PSQNp/71I1hGJLf/78TXd2atHxdcx5LoP10i7tG40gbVo\nnVJsMr1bX/Bnu56ojT4DnQ==\n-----END PRIVATE KEY-----\n""")
+    cred = credentials.Certificate(json.loads(firebase_creds_json))
+    initialize_app(cred)
+    db = firestore.client()
+except Exception as e:
+    logging.error(f"Failed to initialize Firebase: {e}")
+    db = None
 
 # --- Налаштування ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8223675237:AAF_kmo6SP4XZS23NeXWFxgkQNUaEZOWNx0")
@@ -42,9 +66,6 @@ ADMIN_IDS = [
 ]
 GYMNASIUM_URL = "https://brodygymnasium.e-schools.info"
 TARGET_CHANNEL_ID = -1002946740131
-NOTIFIED_ADMINS_FILE = 'notified_admins.json'
-ADMIN_CONTACTS_FILE = 'admin_contacts.json'
-CONVERSATIONS_FILE = 'conversations.json'
 
 # --- Кінець налаштувань ---
 
@@ -56,23 +77,50 @@ logger = logging.getLogger(__name__)
 active_websockets: Dict[str, web.WebSocketResponse] = {}
 web_sessions: Dict[str, Dict] = {} 
 
-# --- Утиліти для збереження/зчитування JSON ---
-def load_data(filename: str, default_type: Any = None) -> Any:
-    try:
-        with open(filename, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        if default_type is not None:
-            return default_type
-        if 'user_ids' in filename or 'notified_admins' in filename: return []
+# --- Утиліти для роботи з Firestore ---
+def get_collection_ref(collection_name: str):
+    """Отримує посилання на колекцію з урахуванням ID додатка."""
+    if db:
+        return db.collection('artifacts').document(__app_id).collection(collection_name)
+    return None
+
+async def load_data(collection_name: str, doc_id: str = None) -> Any:
+    """Зчитує дані з Firestore. Якщо doc_id не вказано, зчитує всі документи колекції."""
+    if not db:
+        logger.error("Database connection is not initialized.")
         return {}
 
-def save_data(data: Any, filename: str) -> None:
     try:
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
-    except Exception as e:
-        logger.error(f"Помилка save_data({filename}): {e}")
+        if doc_id:
+            doc_ref = get_collection_ref(collection_name).document(doc_id)
+            doc = await asyncio.to_thread(doc_ref.get)
+            return doc.to_dict() if doc.exists else {}
+        else:
+            docs = await asyncio.to_thread(get_collection_ref(collection_name).stream)
+            data = {}
+            for doc in docs:
+                data[doc.id] = doc.to_dict()
+            return data
+    except FirebaseError as e:
+        logger.error(f"Firebase load error for '{collection_name}': {e}")
+        return {}
+
+async def save_data(collection_name: str, data: Any, doc_id: str | None = None) -> None:
+    """Зберігає дані в Firestore."""
+    if not db:
+        logger.error("Database connection is not initialized.")
+        return
+
+    try:
+        collection_ref = get_collection_ref(collection_name)
+        if doc_id:
+            doc_ref = collection_ref.document(doc_id)
+            await asyncio.to_thread(doc_ref.set, data, merge=True)
+        else:
+            await asyncio.to_thread(collection_ref.add, data)
+        logger.info(f"Дані успішно збережено в колекції '{collection_name}'.")
+    except FirebaseError as e:
+        logger.error(f"Firebase save error for '{collection_name}': {e}")
 
 # --- Web App Утиліти ---
 def get_user_from_init_data(init_data_str: str) -> dict | None:
@@ -94,12 +142,15 @@ async def get_user_context(request: web.Request) -> dict | None:
     return None
 
 async def send_reply_to_user(ptb_app: Application, user_id: str | int, text: str):
-    conversations = load_data(CONVERSATIONS_FILE, {})
-    user_id_str = str(user_id)
-    if user_id_str not in conversations: conversations[user_id_str] = []
-    conversations[user_id_str].append({"sender": "bot", "text": text, "timestamp": datetime.now().isoformat()})
-    save_data(conversations, CONVERSATIONS_FILE)
+    conversations = await load_data('conversations', str(user_id))
+    if not conversations:
+        conversations = {}
+    if 'messages' not in conversations:
+        conversations['messages'] = []
+    conversations['messages'].append({"sender": "bot", "text": text, "timestamp": datetime.now().isoformat()})
+    await save_data('conversations', conversations, str(user_id))
 
+    user_id_str = str(user_id)
     if user_id_str in active_websockets:
         try:
             await active_websockets[user_id_str].send_json({'type': 'message', 'payload': {'text': text}})
@@ -177,7 +228,9 @@ async def handle_api_init(request: web.Request) -> web.Response:
     if not user: return web.json_response({'authStatus': 'required'})
 
     user_id_str = str(user['id'])
-    history = load_data(CONVERSATIONS_FILE, {}).get(user_id_str, [])
+    history_doc = await load_data('conversations', user_id_str)
+    history = history_doc.get('messages', []) if history_doc else []
+    
     response_data = {'user': user, 'isAdmin': user['id'] in ADMIN_IDS, 'history': history}
     if session_token: response_data['sessionToken'] = session_token
     return web.json_response(response_data)
@@ -190,6 +243,11 @@ async def handle_api_login(request: web.Request) -> web.Response:
     session_token, user_id = uuid.uuid4().hex, f"web-{uuid.uuid4().hex[:8]}"
     user_data = {'id': user_id, 'first_name': name, 'username': f"{name} ({user_class})"}
     web_sessions[session_token] = user_data
+    
+    # Save web app user data to Firestore
+    user_info = {'name': name, 'class': user_class, 'created_at': datetime.now().isoformat()}
+    await save_data('users', user_info, user_id)
+    
     return web.json_response({'user': user_data, 'sessionToken': session_token})
 
 async def handle_send_message_web(request: web.Request) -> web.Response:
@@ -200,10 +258,12 @@ async def handle_send_message_web(request: web.Request) -> web.Response:
     
     user_id, user_name = str(user['id']), user.get('first_name', 'User')
     
-    conversations = load_data(CONVERSATIONS_FILE, {})
-    if user_id not in conversations: conversations[user_id] = []
-    conversations[user_id].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
-    save_data(conversations, CONVERSATIONS_FILE)
+    # Save message to Firestore
+    conversations = await load_data('conversations', user_id)
+    if not conversations:
+        conversations = {'messages': []}
+    conversations['messages'].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
+    await save_data('conversations', conversations, user_id)
 
     forward_text = (f"📩 **Нове звернення (з Web App)**\n\n"
                     f"**Від:** {user_name} (ID: {user_id})\n\n"
@@ -227,11 +287,14 @@ async def admin_action_wrapper(request: web.Request, action: Callable):
     return await action(request)
 
 async def get_stats_web(request: web.Request):
-    user_count = len(load_data('user_ids.json', []))
+    users_doc_ref = get_collection_ref('users')
+    users_docs = await asyncio.to_thread(users_doc_ref.stream)
+    user_count = sum(1 for _ in users_docs)
     return web.json_response({'user_count': user_count})
 
 async def get_kb_view_web(request: web.Request):
-    return web.json_response(load_data('knowledge_base.json', {}))
+    kb = await load_data('knowledge_base', 'main')
+    return web.json_response(kb)
 
 async def broadcast_web(request: web.Request):
     data = await request.json()
@@ -243,16 +306,21 @@ async def broadcast_web(request: web.Request):
     return web.json_response({'success': success, 'fail': fail})
     
 async def get_conversations_web(request: web.Request):
-    conversations = load_data(CONVERSATIONS_FILE, {})
+    conversations_ref = get_collection_ref('conversations')
+    docs = await asyncio.to_thread(conversations_ref.order_by(firestore.FieldPath(['messages', -1, 'timestamp']), direction=firestore.Query.DESCENDING).limit(10).stream)
+    
     conv_list = []
-    for user_id, messages in conversations.items():
+    for doc in docs:
+        data = doc.to_dict()
+        messages = data.get('messages', [])
+        user_id = doc.id
+        
         if messages:
             user_name = f"User {user_id}"
             if user_id.startswith('web-'):
-                for session in web_sessions.values():
-                    if str(session['id']) == user_id:
-                        user_name = session.get('first_name', user_name)
-                        break
+                user_doc = await load_data('users', user_id)
+                if user_doc:
+                    user_name = user_doc.get('name', user_name)
             
             conv_list.append({
                 "user_id": user_id,
@@ -260,13 +328,13 @@ async def get_conversations_web(request: web.Request):
                 "last_message": messages[-1]['text'],
                 "timestamp": messages[-1]['timestamp']
             })
-    conv_list.sort(key=lambda x: x['timestamp'], reverse=True)
-    return web.json_response({"conversations": conv_list[:10]})
+    return web.json_response({"conversations": conv_list})
 
 async def suggest_reply_web(request: web.Request):
     data = await request.json()
     user_id = data.get('user_id')
-    history = load_data(CONVERSATIONS_FILE, {}).get(str(user_id), [])
+    history_doc = await load_data('conversations', str(user_id))
+    history = history_doc.get('messages', []) if history_doc else []
     if not history: return web.json_response({"error": "No history found"}, status=404)
     
     history_text = "\n".join([f"{msg['sender']}: {msg['text']}" for msg in history[-5:]])
@@ -347,12 +415,12 @@ async def generate_text_with_fallback(prompt: str) -> str | None:
 
 
 # --- Сповіщення для адмінів ---
-def get_admin_name(admin_id: int) -> str:
-    admin_contacts = load_data(ADMIN_CONTACTS_FILE)
+async def get_admin_name(admin_id: int) -> str:
+    admin_contacts = await load_data('admin_contacts')
     return admin_contacts.get(str(admin_id), f"Адміністратор {admin_id}")
 
 async def notify_other_admins(context: ContextTypes.DEFAULT_TYPE, replying_admin_id: int, original_message_text: str) -> None:
-    admin_name = get_admin_name(replying_admin_id)
+    admin_name = await get_admin_name(replying_admin_id)
     notification_text = f"ℹ️ **{admin_name}** відповів на звернення:\n\n> _{original_message_text[:300]}..._"
     for admin_id in ADMIN_IDS:
         if admin_id != replying_admin_id:
@@ -361,31 +429,27 @@ async def notify_other_admins(context: ContextTypes.DEFAULT_TYPE, replying_admin
             except Exception as e:
                 logger.warning(f"Не вдалося надіслати сповіщення адміну {admin_id}: {e}")
 
-
 # --- Універсальний розсильник ---
 async def do_broadcast(context: ContextTypes.DEFAULT_TYPE | Application, text_content: str, photo: bytes | str | None = None, video: str | None = None) -> tuple[int, int]:
     full_text_content = f"{text_content}"
     
-    if isinstance(context, Application):
-        bot = context.bot
-        user_ids = context.bot_data.get('user_ids', set())
-    else: # ContextTypes.DEFAULT_TYPE
-        bot = context.bot
-        user_ids = context.bot_data.get('user_ids', set())
-
+    users_doc_ref = get_collection_ref('users')
+    users_docs = await asyncio.to_thread(users_doc_ref.stream)
+    user_ids = [doc.id for doc in users_docs if str(doc.id).isdigit()]
+    
     success, fail = 0, 0
     for user_id in user_ids:
         try:
             if photo:
-                await bot.send_photo(user_id, photo=photo, caption=full_text_content, parse_mode='Markdown')
+                await context.bot.send_photo(user_id, photo=photo, caption=full_text_content, parse_mode='Markdown')
             elif video:
-                await bot.send_video(user_id, video=video, caption=full_text_content, parse_mode='Markdown')
+                await context.bot.send_video(user_id, video=video, caption=full_text_content, parse_mode='Markdown')
             else:
                 if len(full_text_content) > 4096:
                     for i in range(0, len(full_text_content), 4096):
-                        await bot.send_message(user_id, text=full_text_content[i:i + 4096])
+                        await context.bot.send_message(user_id, text=full_text_content[i:i + 4096])
                 else:
-                    await bot.send_message(user_id, text=full_text_content)
+                    await context.bot.send_message(user_id, text=full_text_content)
             success += 1
             await asyncio.sleep(0.05)
         except Exception as e:
@@ -484,7 +548,7 @@ async def gather_all_context(query: str) -> str:
 
     site_text, teachers_info = await asyncio.gather(site_text_task, teachers_info_task)
 
-    kb = load_data('knowledge_base.json') or {}
+    kb = await load_data('knowledge_base', 'main') or {}
     relevant_kb = {}
     if isinstance(kb, dict):
         qwords = set(query.lower().split())
@@ -512,17 +576,18 @@ async def check_website_for_updates(context: ContextTypes.DEFAULT_TYPE):
         logger.info("Не вдалося отримати текст з сайту.")
         return
 
-    last_check_data = load_data('website_content.json') or {}
+    last_check_data = await load_data('website_content', 'latest') or {}
     previous_text = last_check_data.get('text', '')
 
     if new_text != previous_text:
         logger.info("Знайдено оновлення на сайті!")
-        save_data({'text': new_text, 'timestamp': datetime.now().isoformat()}, 'website_content.json')
+        await save_data('website_content', {'text': new_text, 'timestamp': datetime.now().isoformat()}, 'latest')
         await propose_website_update(context, new_text)
 async def propose_website_update(context: ContextTypes.DEFAULT_TYPE, text_content: str):
     truncated_text = text_content[:800] + "..." if len(text_content) > 800 else text_content
     broadcast_id = f"website_update_{uuid.uuid4().hex[:8]}"
-    context.bot_data[broadcast_id] = text_content
+    
+    context.bot_data.setdefault('scheduled_actions', {})[broadcast_id] = text_content
 
     keyboard = [
         [InlineKeyboardButton("Зробити розсилку 📢", callback_data=f"broadcast_website:{broadcast_id}")],
@@ -542,11 +607,12 @@ async def website_update_handler(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     action, broadcast_id = query.data.split(':', 1)
 
+    full_text = context.bot_data.get('scheduled_actions', {}).get(broadcast_id)
+    if not full_text:
+        await query.edit_message_text("Помилка: текст для розсилки застарів або не знайдено.")
+        return
+    
     if action == 'broadcast_website':
-        full_text = context.bot_data.get(broadcast_id)
-        if not full_text:
-            await query.edit_message_text("Помилка: текст для розсилки застарів або не знайдено.")
-            return
         await query.edit_message_reply_markup(reply_markup=None)
         await query.message.reply_text(f"📢 *Починаю розсилку оновлення з сайту...*")
         success, fail = await do_broadcast(context, text_content=full_text)
@@ -557,8 +623,8 @@ async def website_update_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(text=new_text, parse_mode='Markdown')
         await query.edit_message_reply_markup(reply_markup=None)
 
-    if broadcast_id in context.bot_data:
-        del context.bot_data[broadcast_id]
+    if broadcast_id in context.bot_data.get('scheduled_actions', {}):
+        del context.bot_data['scheduled_actions'][broadcast_id]
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
         [
@@ -632,7 +698,11 @@ async def admin_stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     if not query: return
     await query.answer()
-    user_count = len(context.bot_data.get('user_ids', set()))
+    
+    users_doc_ref = get_collection_ref('users')
+    users_docs = await asyncio.to_thread(users_doc_ref.stream)
+    user_count = sum(1 for _ in users_docs)
+
     await query.edit_message_text(f"📊 **Статистика бота:**\n\nВсього унікальних користувачів: {user_count}", parse_mode='Markdown')
 async def start_kb_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -650,17 +720,19 @@ async def get_kb_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if not key:
         await update.message.reply_text("Ключ не знайдено. Повторіть операцію.", parse_mode='Markdown')
         return ConversationHandler.END
-    kb = load_data('knowledge_base.json') or {}
-    if not isinstance(kb, dict): kb = {}
-    kb[key] = value
-    save_data(kb, 'knowledge_base.json')
+        
+    kb_doc = await load_data('knowledge_base', 'main') or {}
+    if not isinstance(kb_doc, dict): kb_doc = {}
+    kb_doc[key] = value
+    await save_data('knowledge_base', kb_doc, 'main')
+    
     await update.message.reply_text(f"✅ Дані успішно збережено!\n\n**{key}**: {value}", parse_mode='Markdown')
     return ConversationHandler.END
 async def view_kb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
     
-    kb = load_data('knowledge_base.json') or {}
+    kb = await load_data('knowledge_base', 'main') or {}
     if not kb or not isinstance(kb, dict):
         await query.edit_message_text("База знань порожня або пошкоджена.")
         return
@@ -703,10 +775,10 @@ async def delete_kb_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(f"❌ Помилка: цей запит застарів. Будь ласка, відкрийте базу знань знову.", parse_mode='Markdown')
         return
 
-    kb = load_data('knowledge_base.json') or {}
+    kb = await load_data('knowledge_base', 'main') or {}
     if key_to_delete in kb:
         del kb[key_to_delete]
-        save_data(kb, 'knowledge_base.json')
+        await save_data('knowledge_base', kb, 'main')
         await query.edit_message_text(f"✅ Запис з ключем `{key_to_delete}` видалено.", parse_mode='Markdown')
     else:
         await query.edit_message_text(f"❌ Помилка: запис з ключем `{key_to_delete}` не знайдено (можливо, вже видалено).", parse_mode='Markdown')
@@ -723,7 +795,7 @@ async def start_kb_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     context.chat_data['key_to_edit'] = key_to_edit
     
-    kb = load_data('knowledge_base.json') or {}
+    kb = await load_data('knowledge_base', 'main') or {}
     current_value = kb.get(key_to_edit, "Не знайдено")
 
     await query.message.reply_text(
@@ -742,16 +814,16 @@ async def get_kb_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("❌ Помилка: ключ для редагування втрачено. Спробуйте знову.")
         return ConversationHandler.END
 
-    kb = load_data('knowledge_base.json') or {}
+    kb = await load_data('knowledge_base', 'main') or {}
     if not isinstance(kb, dict): kb = {}
 
     kb[key_to_edit] = new_value
-    save_data(kb, 'knowledge_base.json')
+    await save_data('knowledge_base', kb, 'main')
 
     await update.message.reply_text(f"✅ Запис успішно оновлено!\n\n**{key_to_edit}**: {new_value}", parse_mode='Markdown')
     return ConversationHandler.END
 async def faq_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    kb = load_data('knowledge_base.json') or {}
+    kb = await load_data('knowledge_base', 'main') or {}
     if not kb or not isinstance(kb, dict):
         await update.message.reply_text("Наразі поширених запитань немає.")
         return
@@ -783,7 +855,7 @@ async def faq_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.reply_text("Вибачте, це питання застаріло.")
         return
 
-    kb = load_data('knowledge_base.json') or {}
+    kb = await load_data('knowledge_base', 'main') or {}
     answer = kb.get(key)
 
     if answer:
@@ -956,7 +1028,7 @@ async def generate_post_from_site(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text("❌ Не вдалося згенерувати текст поста. Усі системи ШІ недоступні.")
             return
 
-        await query.edit_message_text("🎨 *Генерую зображення для поста...*", parse_mode='Markdown')
+        await query.edit_message_text("🎨 *Генерую зображення...*", parse_mode='Markdown')
         image_prompt_for_ai = (
             "На основі цього тексту, створи короткий опис (3-7 слів) англійською мовою для генерації зображення. Опис має бути символічним та мінімалістичним.\n\n"
             f"Текст: {post_text[:300]}"
@@ -1026,19 +1098,27 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     post_text = post.text or post.caption or ""
     if not post_text: return
     logger.info(f"Отримано пост з цільового каналу: {post_text[:50]}...")
-    if 'channel_posts' not in context.bot_data:
-        context.bot_data['channel_posts'] = []
-    context.bot_data['channel_posts'].insert(0, post_text)
-    context.bot_data['channel_posts'] = context.bot_data['channel_posts'][:20]
+    channel_posts = await load_data('channel_posts', 'main') or {}
+    posts = channel_posts.get('posts', [])
+    posts.insert(0, post_text)
+    posts = posts[:20]
+    await save_data('channel_posts', {'posts': posts}, 'main')
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id in ADMIN_IDS:
         await admin_command_entry(update, context, command_handler=admin_panel)
         return
 
-    if 'user_ids' not in context.bot_data:
-        context.bot_data['user_ids'] = set()
-    context.bot_data['user_ids'].add(update.effective_user.id)
-    save_data(list(context.bot_data['user_ids']), 'user_ids.json')
+    user_id = str(update.effective_user.id)
+    user_data = await load_data('users', user_id)
+    if not user_data:
+        user_info = {
+            'id': update.effective_user.id,
+            'first_name': update.effective_user.first_name,
+            'username': update.effective_user.username,
+            'created_at': datetime.now().isoformat()
+        }
+        await save_data('users', user_info, user_id)
+        
     await update.message.reply_text(
         'Вітаємо! Це офіційний бот каналу новин Бродівської гімназії.\n\n'
         '➡️ Напишіть ваше запитання або пропозицію, щоб відправити її адміністратору.\n'
@@ -1054,16 +1134,14 @@ async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_data = context.user_data
     
     # Збереження повідомлення в історію
-    user_id = update.effective_user.id
+    user_id = str(update.effective_user.id)
     text = message.text or message.caption or ""
-    conversations = load_data(CONVERSATIONS_FILE, {})
-    user_id_str = str(user_id)
-    if user_id_str not in conversations: conversations[user_id_str] = []
-    conversations[user_id_str].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
-    save_data(conversations, CONVERSATIONS_FILE)
+    conversations_doc = await load_data('conversations', user_id) or {'messages': []}
+    conversations_doc['messages'].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
+    await save_data('conversations', conversations_doc, user_id)
 
 
-    user_data['user_info'] = {'id': update.effective_user.id, 'name': update.effective_user.full_name}
+    user_data['user_info'] = {'id': user_id, 'name': update.effective_user.full_name}
 
     if message.text:
         user_data['user_message'] = message.text
@@ -1130,13 +1208,11 @@ async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TY
     category = context.user_data.get('category', 'Без категорії')
     
     # Збереження доповнення в історію
-    user_id = update.effective_user.id
+    user_id = str(update.effective_user.id)
     text = update.message.text or update.message.caption or ""
-    conversations = load_data(CONVERSATIONS_FILE, {})
-    user_id_str = str(user_id)
-    if user_id_str not in conversations: conversations[user_id_str] = []
-    conversations[user_id_str].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
-    save_data(conversations, CONVERSATIONS_FILE)
+    conversations_doc = await load_data('conversations', user_id) or {'messages': []}
+    conversations_doc['messages'].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
+    await save_data('conversations', conversations_doc, user_id)
 
 
     keyboard = [
@@ -1168,18 +1244,19 @@ async def anonymous_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return WAITING_FOR_ANONYMOUS_MESSAGE
 async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     anon_id = str(uuid.uuid4())[:8]
-    user_id = update.effective_user.id
-    if 'anonymous_map' not in context.bot_data:
-        context.bot_data['anonymous_map'] = {}
-    context.bot_data['anonymous_map'][anon_id] = user_id
+    user_id = str(update.effective_user.id)
+    
+    # Save anonymous message to Firestore
+    anonymous_map = await load_data('anonymous_map', 'main') or {}
+    anonymous_map[anon_id] = user_id
+    await save_data('anonymous_map', anonymous_map, 'main')
+    
     message_text = update.message.text
     
     # Збереження анонімного повідомлення в історію
-    user_id_str = str(user_id)
-    conversations = load_data(CONVERSATIONS_FILE, {})
-    if user_id_str not in conversations: conversations[user_id_str] = []
-    conversations[user_id_str].append({"sender": "user", "text": f"(Анонімно) {message_text}", "timestamp": datetime.now().isoformat()})
-    save_data(conversations, CONVERSATIONS_FILE)
+    conversations_doc = await load_data('conversations', user_id) or {'messages': []}
+    conversations_doc['messages'].append({"sender": "user", "text": f"(Анонімно) {message_text}", "timestamp": datetime.now().isoformat()})
+    await save_data('conversations', conversations_doc, user_id)
 
 
     keyboard = [
@@ -1205,7 +1282,11 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return ConversationHandler.END
 async def get_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.chat_data['broadcast_message'] = update.message.text
-    user_count = len(context.bot_data.get('user_ids', set()))
+    
+    users_doc_ref = get_collection_ref('users')
+    users_docs = await asyncio.to_thread(users_doc_ref.stream)
+    user_count = sum(1 for _ in users_docs)
+    
     keyboard = [
         [InlineKeyboardButton("Так, надіслати ✅", callback_data="confirm_broadcast")],
         [InlineKeyboardButton("Ні, скасувати ❌", callback_data="cancel_broadcast")]
@@ -1361,7 +1442,7 @@ async def start_anonymous_ai_reply(update: Update, context: ContextTypes.DEFAULT
         if not ai_response_text:
             raise ValueError("Не вдалося згенерувати відповідь. Усі системи ШІ недоступні.")
 
-        context.chat_data['ai_response'] = ai_response_text
+            context.chat_data['ai_response'] = ai_response_text
         keyboard = [
             [InlineKeyboardButton("Надіслати відповідь ✅", callback_data=f"send_anon_ai_reply:{anon_id}")],
             [InlineKeyboardButton("Скасувати ❌", callback_data="cancel_ai_reply")]
@@ -1381,7 +1462,8 @@ async def send_anonymous_ai_reply_to_user(update: Update, context: ContextTypes.
     _, anon_id = query.data.split(':', 1)
 
     ai_response_text = context.chat_data.get('ai_response')
-    user_id = context.bot_data.get('anonymous_map', {}).get(anon_id)
+    anonymous_map = await load_data('anonymous_map', 'main') or {}
+    user_id = anonymous_map.get(anon_id)
     original_message = context.chat_data.get('original_user_message', 'Невідоме анонімне звернення')
 
     if not ai_response_text or not user_id:
@@ -1389,7 +1471,7 @@ async def send_anonymous_ai_reply_to_user(update: Update, context: ContextTypes.
         return ConversationHandler.END
 
     try:
-        await send_reply_to_user(context.application, user_id, f"🤫 **Відповідь на ваше анонімне звернення (від ШІ):**\n\n{ai_response_text}")
+        await send_reply_to_user(context.application, int(user_id), f"🤫 **Відповідь на ваше анонімне звернення (від ШІ):**\n\n{ai_response_text}")
         await query.edit_message_text(text="✅ *Відповідь аноніму успішно надіслано.*", parse_mode='Markdown')
         await query.edit_message_reply_markup(reply_markup=None)
         await notify_other_admins(context, query.from_user.id, original_message)
@@ -1414,7 +1496,8 @@ async def start_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TY
     return WAITING_FOR_ANONYMOUS_REPLY
 async def send_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     anon_id = context.chat_data.get('anon_id_to_reply')
-    user_id = context.bot_data.get('anonymous_map', {}).get(anon_id)
+    anonymous_map = await load_data('anonymous_map', 'main') or {}
+    user_id = anonymous_map.get(anon_id)
     original_message = context.chat_data.get('original_user_message', 'Невідоме анонімне звернення')
     
     if not user_id:
@@ -1423,7 +1506,7 @@ async def send_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TYP
         
     admin_reply_text = update.message.text
     try:
-        await send_reply_to_user(context.application, user_id, f"🤫 **Відповідь на ваше анонімне звернення:**\n\n{admin_reply_text}")
+        await send_reply_to_user(context.application, int(user_id), f"🤫 **Відповідь на ваше анонімне звернення:**\n\n{admin_reply_text}")
         await update.message.reply_text(f"✅ Вашу відповідь аноніму (ID: {anon_id}) надіслано.")
         await notify_other_admins(context, update.effective_user.id, original_message)
     except Exception as e:
@@ -1449,7 +1532,11 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
         anon_match = re.search(r"\(ID: ([a-f0-9\-]+)\)", text_to_scan)
         if anon_match:
             anon_id = anon_match.group(1)
-            target_user_id = context.bot_data.get('anonymous_map', {}).get(anon_id)
+            anonymous_map = await load_data('anonymous_map', 'main') or {}
+            target_user_id = anonymous_map.get(anon_id)
+            if target_user_id:
+                try: target_user_id = int(target_user_id)
+                except ValueError: pass
             reply_intro = "🤫 **Відповідь на ваше анонімне звернення:**"
 
     if not target_user_id: return
@@ -1620,7 +1707,7 @@ async def handle_test_user_choice(update: Update, context: ContextTypes.DEFAULT_
     if choice == 'test_user_default':
         context.chat_data['test_user_info'] = {
             'id': query.from_user.id,
-            'name': get_admin_name(query.from_user.id)
+            'name': await get_admin_name(query.from_user.id)
         }
         await query.edit_message_text("Добре. Тепер надішліть тестове повідомлення (текст, фото або відео), яке ви хочете перевірити.\n\n/cancel для скасування.")
         return WAITING_FOR_TEST_MESSAGE
@@ -1691,10 +1778,9 @@ async def receive_test_message(update: Update, context: ContextTypes.DEFAULT_TYP
     context.chat_data.clear()
     return ConversationHandler.END
 async def notify_new_admins(application: Application) -> None:
-    notified_admins = load_data(NOTIFIED_ADMINS_FILE)
-    if not isinstance(notified_admins, list):
-        notified_admins = []
-
+    notified_admins_doc = await load_data('notified_admins', 'main') or {}
+    notified_admins = notified_admins_doc.get('ids', [])
+    
     newly_notified = []
     welcome_text = (
         "Вітаємо! Тепер ви адміністратор цього бота.\n\n"
@@ -1712,10 +1798,10 @@ async def notify_new_admins(application: Application) -> None:
 
     if newly_notified:
         all_notified = notified_admins + newly_notified
-        save_data(all_notified, NOTIFIED_ADMINS_FILE)
+        await save_data('notified_admins', {'ids': all_notified}, 'main')
 async def admin_command_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler: Callable) -> int:
     user_id = update.effective_user.id
-    admin_contacts = load_data(ADMIN_CONTACTS_FILE)
+    admin_contacts = await load_data('admin_contacts')
 
     if str(user_id) in admin_contacts:
         await command_handler(update, context)
@@ -1733,12 +1819,12 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
     contact = update.message.contact
     user_id = contact.user_id
 
-    admin_contacts = load_data(ADMIN_CONTACTS_FILE)
+    admin_contacts = await load_data('admin_contacts') or {}
     if not isinstance(admin_contacts, dict):
         admin_contacts = {}
         
     admin_contacts[str(user_id)] = contact.first_name
-    save_data(admin_contacts, ADMIN_CONTACTS_FILE)
+    await save_data('admin_contacts', admin_contacts)
 
     await update.message.reply_text(f"✅ Дякую, {contact.first_name}! Ваш контакт збережено.", reply_markup=ReplyKeyboardRemove())
 
@@ -1759,13 +1845,28 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
     return ConversationHandler.END
 
 async def main() -> None:
-    # --- Створення та налаштування Application ---
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    # Check for Firebase connection and load initial data
+    if db:
+        logger.info("Firebase connection successful. Loading data from Firestore.")
+        try:
+            users_doc_ref = get_collection_ref('users')
+            users_docs = await asyncio.to_thread(users_doc_ref.stream)
+            user_ids = [int(doc.id) for doc in users_docs if str(doc.id).isdigit()]
+            application.bot_data['user_ids'] = set(user_ids)
+            
+            anonymous_map_doc = await load_data('anonymous_map', 'main') or {}
+            application.bot_data['anonymous_map'] = anonymous_map_doc
+        except FirebaseError as e:
+            logger.error(f"Failed to load initial data from Firestore: {e}")
+            application.bot_data['user_ids'] = set()
+            application.bot_data['anonymous_map'] = {}
+    else:
+        logger.warning("No Firebase connection. Data will not be persistent.")
+        application.bot_data['user_ids'] = set()
+        application.bot_data['anonymous_map'] = {}
 
-    # --- Налаштування даних бота та обробників (без змін) ---
-    raw_user_ids = load_data('user_ids.json', [])
-    application.bot_data['user_ids'] = set(raw_user_ids)
-    application.bot_data['anonymous_map'] = {}
 
     user_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND | filters.PHOTO | filters.VIDEO, start_conversation)],
@@ -1951,6 +2052,3 @@ if __name__ == '__main__':
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот зупинено вручну.")
-
-
-
