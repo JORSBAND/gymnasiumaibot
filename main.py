@@ -25,7 +25,7 @@ import aiohttp_cors
 
 # --- Налаштування ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8223675237:AAF_kmo6SP4XZS23NeXWFxgkQNUaEZOWNx0")
-GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEcX6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyBtIxTceQYA6UAUyr9R0RrQWQzFNEnWXYA")
+GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEcX6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyBtIxTceQYA6UAUyr9R0RrWQQzFNEnWXYA")
 GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.strip()]
 CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c6912fc52ccb303667c92687")
 CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "v6HjMgCHEqTiElwnW_hK73j1uqQKud1fG-rPInWD")
@@ -42,7 +42,7 @@ ADMIN_IDS = [
 ]
 GYMNASIUM_URL = "https://brodygymnasium.e-schools.info"
 TARGET_CHANNEL_ID = -1002946740131
-NOTIFIED_ADMINS_FILE = 'notified_admins.json'
+ADMIN_NOTIFIED_FILE = 'admin_notified.json' # Новий файл для відстеження привітань
 ADMIN_CONTACTS_FILE = 'admin_contacts.json'
 CONVERSATIONS_FILE = 'conversations.json'
 
@@ -64,7 +64,7 @@ def load_data(filename: str, default_type: Any = None) -> Any:
     except (FileNotFoundError, json.JSONDecodeError):
         if default_type is not None:
             return default_type
-        if 'user_ids' in filename or 'notified_admins' in filename: return []
+        if 'user_ids' in filename or 'admin_notified' in filename: return []
         return {}
 
 def save_data(data: Any, filename: str) -> None:
@@ -1691,7 +1691,7 @@ async def receive_test_message(update: Update, context: ContextTypes.DEFAULT_TYP
     context.chat_data.clear()
     return ConversationHandler.END
 async def notify_new_admins(application: Application) -> None:
-    notified_admins = load_data(NOTIFIED_ADMINS_FILE)
+    notified_admins = load_data(ADMIN_NOTIFIED_FILE, [])
     if not isinstance(notified_admins, list):
         notified_admins = []
 
@@ -1712,15 +1712,17 @@ async def notify_new_admins(application: Application) -> None:
 
     if newly_notified:
         all_notified = notified_admins + newly_notified
-        save_data(all_notified, NOTIFIED_ADMINS_FILE)
+        save_data(all_notified, ADMIN_NOTIFIED_FILE)
 async def admin_command_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler: Callable) -> int:
     user_id = update.effective_user.id
     admin_contacts = load_data(ADMIN_CONTACTS_FILE)
 
     if str(user_id) in admin_contacts:
+        # Якщо контакт вже є, просто виконуємо команду.
         await command_handler(update, context)
         return ConversationHandler.END
     else:
+        # Якщо контакту немає, просимо його.
         context.chat_data['next_step_handler'] = command_handler.__name__
         keyboard = [[KeyboardButton("Надіслати мій контакт 👤", request_contact=True)]]
         await update.message.reply_text(
@@ -1733,11 +1735,16 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
     contact = update.message.contact
     user_id = contact.user_id
 
+    # Перевіряємо, чи користувач, що надіслав контакт, є в списку ADMIN_IDS
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("Ви не є адміністратором цього бота.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+
     admin_contacts = load_data(ADMIN_CONTACTS_FILE)
     if not isinstance(admin_contacts, dict):
         admin_contacts = {}
         
-    admin_contacts[str(user_id)] = contact.first_name
+    admin_contacts[str(user_id)] = contact.first_name or "Невідоме ім'я" # Зберігаємо ім'я
     save_data(admin_contacts, ADMIN_CONTACTS_FILE)
 
     await update.message.reply_text(f"✅ Дякую, {contact.first_name}! Ваш контакт збережено.", reply_markup=ReplyKeyboardRemove())
@@ -1751,10 +1758,7 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
         }
         handler_to_call = handler_map.get(next_handler_name)
         if handler_to_call:
-            if handler_to_call == test_message_command:
-                return await test_message_command(update, context)
-            else:
-                await handler_to_call(update, context)
+            await handler_to_call(update, context)
     
     return ConversationHandler.END
 
@@ -1853,7 +1857,7 @@ async def main() -> None:
             CommandHandler("testm", lambda u, c: admin_command_entry(u, c, command_handler=test_message_command)),
         ],
         states={
-            WAITING_FOR_ADMIN_CONTACT: [MessageHandler(filters.CONTACT & filters.User(ADMIN_IDS), receive_admin_contact)],
+            WAITING_FOR_ADMIN_CONTACT: [MessageHandler(filters.CONTACT, receive_admin_contact)],
             SELECTING_TEST_USER: [CallbackQueryHandler(handle_test_user_choice, pattern='^test_user_.*$')],
             WAITING_FOR_TEST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_test_name)],
             WAITING_FOR_TEST_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_test_id)],
@@ -1951,6 +1955,3 @@ if __name__ == '__main__':
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот зупинено вручну.")
-
-
-
