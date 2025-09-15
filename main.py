@@ -36,16 +36,17 @@ try:
     firebase_creds_json = os.environ.get("FIREBASE_CREDENTIALS", """
     {
        "type": "service_account",
-  "project_id": "gymnasiumaibot",
-  "private_key_id": "408836146185affa7bb56379a3ebaf74c63dc304",
-  "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDToBcIvZg5xiot\n+y0I6FpqXrNJedX2GyI7XdhtoPFpkZgpvaRlZxCJ2O3SLtKjhN3SBOt97mRKWTU6\nLGOaXP1FZ4nU5nsjZbnQbT78E7vTarFsvnnJnfpK6GHO8s/SEXWRVm7C5x8HHOGS\nemjMYqhr+r33DQLP/UQ6RmlZ+TUMT56GB39Gxa1AQ4bO136r4NReKc2+/NEyaaOu\nePLKGnrvHNG8gbinlmw78Zq1NanwB2Ljq11J+3un+MNllgT2tN82cRKL7Md1LHj6\n3lsqtBMMpYMhD6Xb2AGIYNkjFXGvVmbKzsXBfuQm3fNJphKgoLEm6hhXrIfyJL/L\nM9vgBF4XAgMBAAECggEAWP00Qm4rgXvlh8Fb7id6wckBvk933A4L5ofvdyYa7ggV\nwtOmuidNSpIIa35Z//3ioyqDdkiVLrh1i/lXhvU8YX+I85hZxohDyzPtLOYFcQEo\nC7DLGK+QLQir/HCZWF4UIKIGYHn8z6pi5owH3o5MAWAGmskDWj/HfXPXYEjNeFeM\n5Przbt74U7vO+fAvOsYezJInHRDOg8Lc+5LU3jdjuB5KNZmI2FsO7gTzISjkz/Cr\npJwRx1McLnocpzJDVsiaQYZL0nvMS4PDxeAb+u7AluWpdr6KJPBODYqxpbVVwRkc\nen/k9jhRljMl3h/9HFQGuLW1fZxdsnaXWTbTe3FLZQKBgQDuKYnoB6lIMpESCKFj\njkL/5YDpXRaszQGhMTKCOHUmv2IMeHqZiRLDnhqh0ivotqi55EohNRfSy9cB+5cR\nONjl5yYJiODo0lGZoukM4b+9uGlC1++NICk3AMjC86AyCbyXnqaJfzvgNZ11n3qE\nnu62fhxBuA8caGezyphUwBlA5QKBgQDjeb1On8uP0dcMrP1EgTMUuU38KmyBxsc2\nu66+2YPVBlTjBT5dn5vn4q3valZEQGunt7qv9SrSCeb9cYfD2Z3IDBf2wXn8yVJP\n3SsWdKnIFom2I+crAWUgd3hcocXNKBDpZS5Pm4GkJpDbXRkP5ql5a111dqLpburg\npp/zzq4/SwKBgCUFCe2qOzMAwTIHa2a5N0rllrsvgBXOLAGtTweU1Qj32LrNg2kY\nOHV1vvgGXlLnCaUTij5NLW3Tx5EEVYAU0QozeuMihqtJ/eseupEJCi/oWVxNimvq\nYt2s3ogHLJB6mPkMbSCUSW9ZhidBad7xgXOWeLfyb07gH7Z/uFv8HDDNAoGAQ7qG\nk/deC6dF6V9EVXZGeEAoKRGUlxtRS0mcYPSwnOeytJlmFUglimhis2ss3kt0Ak7h\nBezwX/NU1FdOPhD4OoznQbAfmxVyLZdDcf8wYgPb4uBTvuk+a+lGbAY6t7fbOTLI\nFCnP8skMzlOs16AtC5rdC9FT9j7xLgxOibAbD3sCgYA2n8BpAtLdgfPbV68thSCT\nopNttXwT+DyIS8JatM0M/3czatfTIabs7HugVAwKygcMW7EsYMMJaFRcGrfeiDfz\nbtZxPpMOq3Rah/ouf06PSQNp/71I1hGJLf/78TXd2atHxdcx5LoP10i7tG40gbVo\nnVJsMr1bX/Bnu56ojT4DnQ==\n-----END PRIVATE KEY-----\n",
-  "client_email": "firebase-adminsdk-fbsvc@gymnasiumaibot.iam.gserviceaccount.com",
-  "client_id": "112536009692316664487",
-  "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-  "token_uri": "https://oauth2.googleapis.com/token",
-  "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-  "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40gymnasiumaibot.iam.gserviceaccount.com",
-  "universe_domain": "googleapis.com"    }
+       "project_id": "gymnasiumaibot",
+       "private_key_id": "408836146185affa7bb56379a3ebaf74c63dc304",
+       "private_key": "-----BEGIN PRIVATE KEY-----\nMIIEvAIBADANBgkqhkiG9w0BAQEFAASCBKYwggSiAgEAAoIBAQDToBcIvZg5xiot\n+y0I6FpqXrNJedX2GyI7XdhtoPFpkZgpvaRlZxCJ2O3SLtKjhN3SBOt97mRKWTU6\nLGOaXP1FZ4nU5nsjZbnQbT78E7vTarFsvnnJnfpK6GHO8s/SEXWRVm7C5x8HHOGS\nemjMYqhr+r33DQLP/UQ6RmlZ+TUMT56GB39Gxa1AQ4bO136r4NReKc2+/NEyaaOu\nePLKGnrvHNG8gbinlmw78Zq1NanwB2Ljq11J+3un+MNllgT2tN82cRKL7Md1LHj6\n3lsqtBMMpYMhD6Xb2AGIYNkjFXGvVmbKzsXBfuQm3fNJphKgoLEm6hhXrIfyJL/L\nM9vgBF4XAgMBAAECggEAWP00Qm4rgXvlh8Fb7id6wckBvk933A4L5ofvdyYa7ggV\nwtOmuidNSpIIa35Z//3ioyqDdkiVLrh1i/lXhvU8YX+I85hZxohDyzPtLOYFcQEo\nC7DLGK+QLQir/HCZWF4UIKIGYHn8z6pi5owH3o5MAWAGmskDWj/HfXPXYEjNeFeM\n5Przbt74U7vO+fAvOsYezJInHRDOg8Lc+5LU3jdjuB5KNZmI2FsO7gTzISjkz/Cr\npJwRx1McLnocpzJDVsiaQYZL0nvMS4PDxeAb+u7AluWpdr6KJPBODYqxpbVVwRkc\nen/k9jhRljMl3h/9HFQGuLW1fZxdsnaXWTbTe3FLZQKBgQDuKYnoB6lIMpESCKFj\njkL/5YDpXRaszQGhMTKCOHUmv2IMeHqZiRLDnhqh0ivotqi55EohNRfSy9cB+5cR\nONjl5yYJiODo0lGZoukM4b+9uGlC1++NICk3AMjC86AyCbyXnqaJfzvgNZ11n3qE\nnu62fhxBuA8caGezyphUwBlA5QKBgQDjeb1On8uP0dcMrP1EgTMUuU38KmyBxsc2\nu66+2YPVBlTjBT5dn5vn4q3valZEQGunt7qv9SrSCeb9cYfD2Z3IDBf2wXn8yVJP\n3SsWdKnIFom2I+crAWUgd3hcocXNKBDpZS5Pm4GkJpDbXRkP5ql5a111dqLpburg\npp/zzq4/SwKBgCUFCe2qOzMAwTIHa2a5N0rllrsvgBXOLAGtTweU1Qj32LrNg2kY\nOHV1vvgGXlLnCaUTij5NLW3Tx5EEVYAU0QozeuMihqtJ/eseupEJCi/oWVxNimvq\nYt2s3ogHLJB6mPkMbSCUSW9ZhidBad7xgXOWeLfyb07gH7Z/uFv8HDDNAoGAQ7qG\nk/deC6dF6V9EVXZGeEAoKRGUlxtRS0mcYPSwnOeytJlmFUglimhis2ss3kt0Ak7h\nBezwX/NU1FdOPhD4OoznQbAfmxVyLZdDcf8wYgPb4uBTvuk+a+lGbAY6t7fbOTLI\nFCnP8skMzlOs16AtC5rdC9FT9j7xLgxOibAbD3sCgYA2n8BpAtLdgfPbV68thSCT\nopNttXwT+DyIS8JatM0M/3czatfTIabs7HugVAwKygcMW7EsYMMJaFRcGrfeiDfz\nbtZxPpMOq3Rah/ouf06PSQNp/71I1hGJLf/78TXd2atHxdcx5LoP10i7tG40gbVo\nnVJsMr1bX/Bnu56ojT4DnQ==\n-----END PRIVATE KEY-----\n",
+       "client_email": "firebase-adminsdk-fbsvc@gymnasiumaibot.iam.gserviceaccount.com",
+       "client_id": "112536009692316664487",
+       "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+       "token_uri": "https://oauth2.googleapis.com/token",
+       "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+       "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/firebase-adminsdk-fbsvc%40gymnasiumaibot.iam.gserviceaccount.com",
+       "universe_domain": "googleapis.com"
+    }
     """)
     cred = credentials.Certificate(json.loads(firebase_creds_json))
     initialize_app(cred)
@@ -98,12 +99,15 @@ async def load_data(collection_name: str, doc_id: str = None) -> Any:
         return {}
 
     try:
+        collection_ref = get_collection_ref(collection_name)
+        if collection_ref is None:
+            return {}
         if doc_id:
-            doc_ref = get_collection_ref(collection_name).document(doc_id)
+            doc_ref = collection_ref.document(doc_id)
             doc = await asyncio.to_thread(doc_ref.get)
             return doc.to_dict() if doc.exists else {}
         else:
-            docs = await asyncio.to_thread(get_collection_ref(collection_name).stream)
+            docs = await asyncio.to_thread(collection_ref.stream)
             data = {}
             for doc in docs:
                 data[doc.id] = doc.to_dict()
@@ -120,6 +124,8 @@ async def save_data(collection_name: str, data: Any, doc_id: str | None = None) 
 
     try:
         collection_ref = get_collection_ref(collection_name)
+        if collection_ref is None:
+            return
         if doc_id:
             doc_ref = collection_ref.document(doc_id)
             await asyncio.to_thread(doc_ref.set, data, merge=True)
@@ -144,9 +150,11 @@ async def get_user_context(request: web.Request) -> dict | None:
     init_data = data.get('initData')
     session_token = data.get('sessionToken')
     
-    if init_data: return get_user_from_init_data(init_data)
-    if session_token and session_token in web_sessions: return web_sessions[session_token]
-    return None
+    user = None
+    if init_data: user = get_user_from_init_data(init_data)
+    elif session_token and session_token in web_sessions: user = web_sessions.get(session_token)
+    
+    return user
 
 async def send_reply_to_user(ptb_app: Application, user_id: str | int, text: str):
     conversations = await load_data('conversations', str(user_id))
@@ -230,7 +238,7 @@ async def handle_api_init(request: web.Request) -> web.Response:
     
     user = None
     if init_data: user = get_user_from_init_data(init_data)
-    elif session_token and session_token in web_sessions: user = web_sessions[session_token]
+    elif session_token and session_token in web_sessions: user = web_sessions.get(session_token)
     
     if not user: return web.json_response({'authStatus': 'required'})
 
@@ -320,7 +328,7 @@ async def get_conversations_web(request: web.Request):
         return web.json_response({'error': 'Database connection is not initialized.'}, status=500)
     
     # Виправлено помилку AttributeError: 'NoneType' object has no attribute 'stream'
-    docs = await asyncio.to_thread(conversations_ref.order_by('messages', direction=firestore.Query.DESCENDING).limit(10).stream)
+    docs = await asyncio.to_thread(conversations_ref.stream)
     
     conv_list = []
     for doc in docs:
@@ -1058,7 +1066,7 @@ async def generate_post_from_site(update: Update, context: ContextTypes.DEFAULT_
         image_bytes = await generate_image(image_prompt.strip() if image_prompt else "school news")
 
         post_id = uuid.uuid4().hex[:8]
-        context.bot_data[f"manual_post_{post_id}"] = {'text': post_text, 'photo': image_bytes}
+        context.bot_data[f"manual_post_{post_id}"] = {'text': processed_text, 'photo': image_bytes}
 
         keyboard = [
             [InlineKeyboardButton("Так, розіслати ✅", callback_data=f"confirm_post:{post_id}")],
