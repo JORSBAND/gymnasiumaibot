@@ -95,12 +95,20 @@ async def get_user_context(request: web.Request) -> dict | None:
     
     if not user_info:
         raise web.HTTPUnauthorized()
-
-    user_id_str = str(user_info.get('id'))
-    if user_id_str not in ADMIN_IDS and user_id_str not in web_sessions:
+    
+    user_id = user_info.get('id')
+    is_admin = False
+    if isinstance(user_id, int):
+        is_admin = user_id in ADMIN_IDS
+    elif isinstance(user_id, str):
+        is_admin = str(user_id) in [str(admin_id) for admin_id in ADMIN_IDS]
+    
+    if not is_admin and str(user_id) not in web_sessions:
         raise web.HTTPForbidden()
-        
+    
+    user_info['isAdmin'] = is_admin
     return user_info
+
 
 async def send_reply_to_user(ptb_app: Application, user_id: str | int, text: str):
     conversations = load_data(CONVERSATIONS_FILE, {})
@@ -187,9 +195,17 @@ async def handle_api_init(request: web.Request) -> web.Response:
 
     user_id_str = str(user['id'])
     history = load_data(CONVERSATIONS_FILE, {}).get(user_id_str, [])
-    response_data = {'user': user, 'isAdmin': user.get('id') in ADMIN_IDS, 'history': history}
+    
+    is_admin = False
+    if isinstance(user['id'], int):
+        is_admin = user['id'] in ADMIN_IDS
+    elif isinstance(user['id'], str):
+        is_admin = str(user['id']) in [str(admin_id) for admin_id in ADMIN_IDS]
+
+    response_data = {'user': user, 'isAdmin': is_admin, 'history': history}
     if session_token: response_data['sessionToken'] = session_token
     return web.json_response(response_data)
+
 
 async def handle_api_login(request: web.Request) -> web.Response:
     data = await request.json()
@@ -235,7 +251,7 @@ async def admin_action_wrapper(request: web.Request, action: Callable):
         user = await get_user_context(request)
     except (web.HTTPUnauthorized, web.HTTPForbidden):
         return web.json_response({'error': 'Unauthorized'}, status=403)
-    if user.get('id') not in ADMIN_IDS:
+    if not user.get('isAdmin'):
          return web.json_response({'error': 'Unauthorized'}, status=403)
     return await action(request)
 
@@ -358,7 +374,7 @@ async def create_news_post_web(request: web.Request):
         image_prompt = await generate_text_with_fallback(image_prompt_for_ai)
         image_bytes = await generate_image(image_prompt.strip() if image_prompt else "school news")
         
-        image_url = f"data:image/jpeg;base64,{image_bytes.decode('utf-8')}"
+        image_url = f"data:image/jpeg;base64,{image_bytes.decode('utf-8')}" if image_bytes else None
         
         return web.json_response({'text': processed_text, 'image_url': image_url})
     except Exception as e:
@@ -387,7 +403,7 @@ async def generate_site_post_web(request: web.Request):
         )
         image_prompt = await generate_text_with_fallback(image_prompt_for_ai)
         image_bytes = await generate_image(image_prompt.strip() if image_prompt else "school news")
-        image_url = f"data:image/jpeg;base64,{image_bytes.decode('utf-8')}"
+        image_url = f"data:image/jpeg;base64,{image_bytes.decode('utf-8')}" if image_bytes else None
 
         return web.json_response({'text': post_text, 'image_url': image_url})
     except Exception as e:
