@@ -38,12 +38,10 @@
 </head>
 <body class="flex flex-col h-full bg-gray-800">
 
-    <!-- Loader Screen -->
     <div id="loader-screen" class="absolute inset-0 bg-gray-900 bg-opacity-80 flex items-center justify-center z-50">
         <div class="loader"></div>
     </div>
     
-    <!-- Standalone Login Modal -->
     <div id="login-modal" class="hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-40 p-4">
         <div class="bg-gray-800 rounded-lg p-6 w-full max-w-sm">
             <h2 class="text-xl font-bold mb-4 text-center">Ідентифікація</h2>
@@ -56,7 +54,6 @@
         </div>
     </div>
     
-    <!-- Admin Modal -->
     <div id="admin-modal" class="modal hidden fixed inset-0 bg-black bg-opacity-70 flex items-center justify-center z-40 p-4" onclick="closeAdminModal()">
         <div class="modal-content bg-gray-800 rounded-lg p-4 w-full max-w-lg max-h-[90vh] flex flex-col transform scale-95" onclick="event.stopPropagation()">
             <div class="flex justify-between items-center mb-4 border-b border-gray-700 pb-2">
@@ -64,12 +61,10 @@
                 <button onclick="closeAdminModal()" class="text-gray-400 hover:text-white text-3xl leading-none">&times;</button>
             </div>
             <div id="admin-content" class="flex-grow overflow-y-auto">
-                <!-- Content will be injected here -->
-            </div>
+                </div>
         </div>
     </div>
 
-    <!-- Main App Content -->
     <div id="app-content" class="flex flex-col flex-grow h-full hidden">
         <header class="bg-gray-900 p-3 text-center shadow-md z-10 flex items-center justify-between">
             <h1 class="text-lg font-bold">Gymnasium AI Bot</h1>
@@ -372,11 +367,7 @@
                     // Placeholder for a new API endpoint to handle the AI processing
                     // You will need to add this endpoint to your main.py
                     // For now, it's a mock response
-                    const mockResponse = {
-                        text: "🎉 Відкриття шкільного театру! ✨ Запрошуємо всіх на прем'єру! 🎭",
-                        image_url: 'https://placehold.co/400x400/2EA6FF/ffffff?text=AI+Image'
-                    };
-                    const post = mockResponse; // await apiCall('/api/admin/create_news_post', { text });
+                    const post = await apiCall('/api/admin/create_news_post', { text });
 
                     document.getElementById('news-text-preview').textContent = post.text;
                     document.getElementById('news-image-preview').src = post.image_url;
@@ -425,8 +416,7 @@
                 const datetime = document.getElementById('schedule-datetime').value;
                 showModalDialog('Підтвердіть планування', `Запланувати новину на ${new Date(datetime).toLocaleString()}?`, async () => {
                     try {
-                        // Placeholder for a new API endpoint
-                        // await apiCall('/api/admin/schedule_news', { text, datetime });
+                        await apiCall('/api/admin/schedule_news', { text, datetime });
                         alert('Новину заплановано!');
                         renderAdminHome();
                     } catch (e) {
@@ -439,8 +429,7 @@
         async function renderScheduledPosts() {
              elements.adminContent.innerHTML = '<div class="loader mx-auto"></div>';
             try {
-                // Placeholder for a new API endpoint
-                const data = []; // await apiCall('/api/admin/view_scheduled');
+                const data = await apiCall('/api/admin/view_scheduled');
                 let html = `${backButton('renderAdminHome')}<h3 class="text-lg font-bold mb-2">Заплановані пости</h3>`;
                 if (data.length === 0) {
                     html += '<p>Немає запланованих постів.</p>';
@@ -464,8 +453,7 @@
         function cancelScheduledPost(postId) {
             showModalDialog('Підтвердіть скасування', 'Ви впевнені, що хочете скасувати цей пост?', async () => {
                  try {
-                    // Placeholder for a new API endpoint
-                    // await apiCall('/api/admin/cancel_scheduled', { postId });
+                    await apiCall('/api/admin/cancel_scheduled', { postId });
                     alert('Пост скасовано!');
                     renderScheduledPosts();
                 } catch (e) {
@@ -491,8 +479,7 @@
                 if (!key || !value) return;
                 showModalDialog('Підтвердіть збереження', `Зберегти: "${key}"?`, async () => {
                     try {
-                        // Placeholder for a new API endpoint
-                        // await apiCall('/api/admin/kb/add', { key, value });
+                        await apiCall('/api/admin/kb/add', { key, value });
                         alert('Дані успішно збережено!');
                         renderAdminHome();
                     } catch (e) {
@@ -538,8 +525,7 @@
                 const newValue = document.getElementById('kb-edit-value').value;
                 showModalDialog('Підтвердіть оновлення', `Оновити запис для "${key}"?`, async () => {
                     try {
-                        // Placeholder for a new API endpoint
-                        // await apiCall('/api/admin/kb/edit', { key, value: newValue });
+                        await apiCall('/api/admin/kb/edit', { key, value: newValue });
                         alert('Запис успішно оновлено!');
                         renderKnowledgeBaseView();
                     } catch (e) {
@@ -552,8 +538,7 @@
         function deleteKnowledgeBaseEntry(key) {
             showModalDialog('Підтвердіть видалення', `Ви впевнені, що хочете видалити запис "${key}"?`, async () => {
                 try {
-                    // Placeholder for a new API endpoint
-                    // await apiCall('/api/admin/kb/delete', { key });
+                    await apiCall('/api/admin/kb/delete', { key });
                     alert('Запис успішно видалено!');
                     renderKnowledgeBaseView();
                 } catch (e) {
@@ -590,12 +575,7 @@
             loaderDiv.classList.remove('hidden');
             previewDiv.classList.add('hidden');
             try {
-                // Placeholder for a new API endpoint
-                // const post = await apiCall('/api/admin/generate_site_post');
-                const post = {
-                    text: "Новини з сайту: 🆕 Оновлення щодо розкладу іспитів. 📝 Деталі на сайті гімназії!",
-                    image_url: 'https://placehold.co/400x400/2EA6FF/ffffff?text=Site+News'
-                };
+                const post = await apiCall('/api/admin/generate_site_post');
                 
                 document.getElementById('site-post-image').src = post.image_url;
                 document.getElementById('site-post-text').textContent = post.text;
