@@ -1743,7 +1743,7 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
     
     return ConversationHandler.END
 
-def main() -> None: # Зроблено синхронною
+async def main() -> None: # Зроблено асинхронною
     # --- Створення та налаштування Application ---
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -1896,25 +1896,19 @@ def main() -> None: # Зроблено синхронною
 
     # --- Запуск JobQueue та Long Polling ---
     
-    # Використовуємо тимчасову асинхронну функцію для ініціалізації
-    async def init_application():
-        await application.initialize()
-
-    # Запускаємо ініціалізацію синхронно, дозволяючи PTB використовувати той же цикл
-    asyncio.run(init_application())
-    
-    # Set up job queue
+    # Ініціалізація та налаштування JobQueue
     kyiv_timezone = pytz.timezone("Europe/Kyiv")
     application.job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
     
     logger.info("Бот запущено через Long Polling.")
     
-    # Запускаємо polling синхронно, дозволяючи PTB керувати життєвим циклом циклу подій
+    # Запуск polling. Цей метод сам керує циклом подій.
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == '__main__':
     try:
-        main() # Виклик синхронної функції main()
+        # Використовуємо синхронний виклик run_polling, обгорнений у try/except
+        main()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот зупинено вручну.")
