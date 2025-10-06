@@ -1789,7 +1789,11 @@ async def main() -> None:
     application.add_handler(create_news_conv)
     application.add_handler(schedule_news_conv)
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
+    # application.add_handler(user_conv) # ПОМИЛКА: user_conv має бути останній, якщо він catch-all
+
+    # ВИПРАВЛЕНО: Реєстрація user_conv (який ловить всі повідомлення, що не є командами) в кінці.
     application.add_handler(user_conv)
+
 
     # --- Запуск JobQueue та Long Polling ---
     await application.initialize()
