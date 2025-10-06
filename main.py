@@ -422,9 +422,13 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(info_text_4, parse_mode='Markdown')
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Нова команда для користувачів
+    # ОНОВЛЕНО: Тепер доступна і для адмінів, але з іншим текстом
     if update.effective_user.id in ADMIN_IDS:
-        await update.message.reply_text("Ви адміністратор. Використовуйте `/admin` для доступу до панелі або `/info` для інструкції.")
+        await update.message.reply_text(
+            "Ви адміністратор. Використовуйте:\n"
+            "• `/admin` для доступу до панелі.\n"
+            "• `/info` для повної інструкції."
+        )
         return
         
     await update.message.reply_text(
@@ -897,7 +901,71 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         '➡️ Використовуйте /help для повторного перегляду інструкції.'
     )
 
-# --- Логіка розмов користувачів (без змін, окрім видалення згадки web-ids) ---
+# --- НОВА ФУНКЦІЯ: Обробка запиту користувача через ШІ ---
+async def auto_ai_reply_if_possible(context: ContextTypes.DEFAULT_TYPE, user_info: Dict, user_message: str, category: str, media_type: str | None = None, file_id: str | None = None) -> bool:
+    """
+    Намагається відповісти користувачу за допомогою ШІ.
+    Якщо відповідь успішна, надсилає її користувачу та сповіщає адмінів.
+    Повертає True, якщо автовідповідь була успішною, інакше - False.
+    """
+    user_id = user_info['id']
+    user_name = user_info['name']
+
+    # 1. Збираємо контекст для ШІ
+    additional_context = await gather_all_context(user_message)
+    
+    # 2. Перевіряємо, чи є в контексті хоча б щось релевантне
+    # (Це приблизний індикатор того, чи буде ШІ відповідати на основі бази знань/сайту, а не загальних знань)
+    is_context_relevant = 'Контекст з бази даних' in additional_context or 'Контекст зі сторінки вчителів' in additional_context or 'Контекст з головної сторінки сайту' in additional_context
+
+    if not is_context_relevant:
+        logger.info(f"Для користувача {user_id} не знайдено релевантного контексту. Перенаправлення до адміна.")
+        return False
+
+    # 3. Генеруємо відповідь
+    prompt = (
+        "Ти — корисний асистент для адміністратора шкільного телеграм-каналу. Дай відповідь на запитання користувача. "
+        "Обов'язково використовуй наданий контекст. Якщо контексту недостатньо, вкажи, що ти шукав у базі, але відповіді не знайшов. "
+        "Відповідь має бути короткою та ввічливою.\n\n"
+        f"--- КОНТЕКСТ (з сайту та бази знань) ---\n{additional_context}\n\n"
+        f"--- ЗАПИТАННЯ КОРИСТУВАЧА ---\n'{user_message}'\n\n"
+        f"--- ВІДПОВІДЬ ---\n"
+    )
+    ai_response_text = await generate_text_with_fallback(prompt)
+
+    if not ai_response_text:
+        logger.error(f"Помилка генерації відповіді ШІ для {user_id}. Перенаправлення до адміна.")
+        return False
+    
+    # 4. Надсилаємо відповідь користувачу
+    await send_reply_to_user(context.application, user_id, ai_response_text)
+    
+    # 5. Сповіщаємо адмінів про автовідповідь
+    forward_text = (f"🤖 **Автовідповідь ШІ**\n\n"
+                    f"**Категорія:** {category}\n"
+                    f"**Від:** {user_name} (ID: {user_id})\n\n"
+                    f"**Запит:**\n---\n{user_message}\n\n"
+                    f"**Автовідповідь ШІ:**\n---\n{ai_response_text}")
+
+    keyboard = [
+        [InlineKeyboardButton("Відповісти особисто (для корекції) ✍️", callback_data=f"manual_reply:{user_id}")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    for admin_id in ADMIN_IDS:
+        try:
+            if media_type == 'photo':
+                await context.bot.send_photo(chat_id=admin_id, photo=file_id, caption=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
+            elif media_type == 'video':
+                await context.bot.send_video(chat_id=admin_id, video=file_id, caption=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
+            else:
+                await context.bot.send_message(chat_id=admin_id, text=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
+        except Exception as e:
+            logger.error(f"Не змогли переслати автовідповідь адміну {admin_id}: {e}")
+
+    return True
+
+# --- Логіка розмов користувачів ---
 async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id in ADMIN_IDS:
         await update.message.reply_text("Адміністратори не можуть створювати звернення. Використовуйте /admin для доступу до панелі.")
@@ -932,13 +1000,19 @@ async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         user_data['file_id'] = message.video.file_id
     else:
         return ConversationHandler.END
-
+        
+    # Спроба автовідповіді
+    if await auto_ai_reply_if_possible(context, user_data['user_info'], user_data['user_message'], user_data.get('category', 'Без категорії'), user_data['media_type'], user_data['file_id']):
+        await update.message.reply_text("✅ Дякуємо! Я надіслав вам автоматичну відповідь. Якщо вона не вирішить ваше питання, просто напишіть доповнення наступним повідомленням.")
+        return IN_CONVERSATION
+        
+    # Якщо автовідповідь не спрацювала, запитуємо категорію
     keyboard = [
         [InlineKeyboardButton("Запитання ❓", callback_data="category_question")],
         [InlineKeyboardButton("Пропозиція 💡", callback_data="category_suggestion")],
         [InlineKeyboardButton("Скарга 📄", callback_data="category_complaint")]
     ]
-    await update.message.reply_text("Будь ласка, оберіть категорію вашого звернення:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Я не зміг дати автоматичну відповідь. Будь ласка, оберіть категорію вашого звернення, щоб його перенаправити адміністратору:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECTING_CATEGORY
 
 async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -961,7 +1035,7 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    forward_text = (f"📩 **Нове звернення**\n\n"
+    forward_text = (f"📩 **Нове звернення (ПОТРЕБУЄ РУЧНОЇ ВІДПОВІДІ)**\n\n"
                     f"**Категорія:** {category}\n"
                     f"**Від:** {user_info['name']} (ID: {user_info['id']})\n\n"
                     f"**Текст:**\n---\n{user_message}")
@@ -977,7 +1051,7 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception as e:
             logger.error(f"Не змогли переслати звернення адміну {admin_id}: {e}")
 
-    await query.edit_message_text("✅ Дякуємо! Ваше повідомлення надіслано. Якщо у вас є доповнення, просто напишіть їх наступним повідомленням.")
+    await query.edit_message_text("✅ Дякуємо! Ваше повідомлення надіслано адміністратору. Очікуйте на відповідь.")
     return IN_CONVERSATION
 
 async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -993,14 +1067,19 @@ async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TY
     conversations[user_id_str].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
     save_data(conversations, CONVERSATIONS_FILE)
 
-
+    # Спроба автовідповіді на доповнення
+    if await auto_ai_reply_if_possible(context, user_info, text, category, update.message.photo[-1].file_id if update.message.photo else None, update.message.video.file_id if update.message.video else None):
+        await update.message.reply_text("✅ Дякуємо! Я надіслав вам автоматичну відповідь.")
+        return IN_CONVERSATION
+        
+    # Якщо автовідповідь не спрацювала, перенаправляємо як доповнення до адміна
     keyboard = [
         [InlineKeyboardButton("Відповісти за допомогою ШІ 🤖", callback_data=f"ai_reply:{user_info['id']}")],
         [InlineKeyboardButton("Відповісти особисто ✍️", callback_data=f"manual_reply:{user_info['id']}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    forward_text = (f"➡️ **Доповнення до розмови**\n\n"
+    forward_text = (f"➡️ **Доповнення до розмови (ПОТРЕБУЄ РУЧНОЇ ВІДПОВІДІ)**\n\n"
                     f"**Категорія:** {category}\n"
                     f"**Від:** {user_info['name']} (ID: {user_info['id']})\n\n"
                     f"**Текст:**\n---\n{update.message.text or update.message.caption or ''}")
@@ -1016,8 +1095,9 @@ async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.error(f"Не змогли переслати доповнення адміну {admin_id}: {e}")
 
-    await update.message.reply_text("✅ Доповнення надіслано.")
+    await update.message.reply_text("✅ Доповнення надіслано адміністратору. Очікуйте на відповідь.")
     return IN_CONVERSATION
+
 
 # --- Анонімне звернення (без змін) ---
 async def anonymous_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1096,7 +1176,7 @@ async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     context.chat_data.clear()
     return ConversationHandler.END
 
-# --- Відповіді адміністратора (вилучено web-related logic) ---
+# --- Відповіді адміністратора ---
 async def start_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
@@ -1106,8 +1186,14 @@ async def start_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.chat_data['target_user_id'] = target_user_id_str
     original_text = query.message.text or query.message.caption or ""
 
-    user_question_part = original_text.split('---\n')
-    context.chat_data['original_user_message'] = user_question_part[-1] if user_question_part else ""
+    user_question_part = original_text.split('Запит:\n---\n') # Новий роздільник для знаходження запиту
+    if len(user_question_part) > 1:
+        user_question = user_question_part[1].split('\n\n')[0]
+        context.chat_data['original_user_message'] = user_question.strip()
+    else:
+        # Якщо це старе звернення або не спрацював split
+        user_question_part = original_text.split('---\n')
+        context.chat_data['original_user_message'] = user_question_part[-1].split('\n\n')[0].strip() if user_question_part[-1] else ""
 
     if action == "manual_reply":
         await query.edit_message_text(text=f"{original_text}\n\n✍️ *Напишіть вашу відповідь. /cancel для скасування*", parse_mode='Markdown')
@@ -1316,8 +1402,11 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
 
     target_user_id = None
     text_to_scan = replied_message.text or replied_message.caption or ""
-    original_message = text_to_scan.split('---\n')[-1].strip()
     
+    # Витягуємо оригінальний запит користувача для сповіщення інших адмінів
+    original_message_match = re.search(r"(Запит:|Текст:)\s*---\s*(.*?)\s*(?:\n\n|\Z)", text_to_scan, re.DOTALL)
+    original_message = original_message_match.group(2).strip() if original_message_match else 'Невідоме звернення'
+
     match = re.search(r"\(ID: (\d+)\)", text_to_scan) # Тільки числові ID
     if match:
         target_user_id_str = match.group(1)
@@ -1496,13 +1585,7 @@ async def test_message_command(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Ця команда доступна лише для адміністраторів.")
         return ConversationHandler.END
         
-    # 2. Перевірка, чи зареєстровано контакт адміністратора
-    admin_contacts = load_data(ADMIN_CONTACTS_FILE)
-    if str(update.effective_user.id) not in admin_contacts:
-        await update.message.reply_text(
-            "Для тестування, будь ласка, спочатку ідентифікуйте себе командою `/admin`, щоб поділитися контактом. Це потрібно лише один раз."
-        )
-        return ConversationHandler.END
+    # 2. Перевірка контакту перенесена в admin_command_entry
 
     keyboard = [
         [InlineKeyboardButton("Використати мої дані (тест)", callback_data="test_user_default")],
@@ -1572,13 +1655,20 @@ async def receive_test_message(update: Update, context: ContextTypes.DEFAULT_TYP
         media_type = 'video'
         file_id = message.video.file_id
 
+    # Змінюємо логіку: намагаємось відповісти ШІ (як і звичайному користувачу)
+    if await auto_ai_reply_if_possible(context, user_info, user_message, "Тест", media_type, file_id):
+        await update.message.reply_text("✅ Тестове повідомлення оброблено (Автовідповідь ШІ).")
+        context.chat_data.clear()
+        return ConversationHandler.END
+        
+    # Якщо ШІ не відповів, надсилаємо адмінам для ручної обробки
     keyboard = [
         [InlineKeyboardButton("Відповісти за допомогою ШІ 🤖", callback_data=f"ai_reply:{user_info['id']}")],
         [InlineKeyboardButton("Відповісти особисто ✍️", callback_data=f"manual_reply:{user_info['id']}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    forward_text = (f"📩 **Нове звернення [ТЕСТ]**\n\n"
+    forward_text = (f"📩 **Нове звернення [ТЕСТ] (ПОТРЕБУЄ РУЧНОЇ ВІДПОВІДІ)**\n\n"
                     f"**Категорія:** Тест\n"
                     f"**Від:** {user_info['name']} (ID: {user_info['id']})\n\n"
                     f"**Текст:**\n---\n{user_message}")
@@ -1594,7 +1684,7 @@ async def receive_test_message(update: Update, context: ContextTypes.DEFAULT_TYP
         except Exception as e:
             logger.error(f"Не вдалося надіслати тестове повідомлення адміну {admin_id}: {e}")
 
-    await update.message.reply_text("✅ Тестове повідомлення надіслано всім адміністраторам.")
+    await update.message.reply_text("✅ Тестове повідомлення надіслано всім адміністраторам для ручної відповіді.")
     context.chat_data.clear()
     return ConversationHandler.END
 
@@ -1632,13 +1722,22 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text(f"✅ Дякую, {contact.first_name}! Ваш контакт збережено.", reply_markup=ReplyKeyboardRemove())
 
     next_handler_name = context.chat_data.get('next_step_handler')
-    if next_handler_name:
-        handler_map = {
-            'admin_panel': admin_panel,
-            'info_command': info_command,
-        }
-        handler_to_call = handler_map.get(next_handler_name)
-        if handler_to_call:
+    
+    # Видаляємо testm з handler_map, оскільки він має повертати стан для ConversationHandler,
+    # а не просто викликати функцію. Обробку /testm робимо окремо.
+    handler_map = {
+        'admin_panel': admin_panel,
+        'info_command': info_command,
+        'test_message_command': test_message_command, # Повернемо, але обробимо через re-entry
+    }
+    
+    handler_to_call = handler_map.get(next_handler_name)
+    
+    if handler_to_call:
+        if handler_to_call.__name__ == 'test_message_command':
+             # Якщо це була команда /testm, повертаємо стан для її ConversationHandler
+            return await test_message_command(update, context)
+        else:
             # Для /admin та /info просто викликаємо функцію
             await handler_to_call(update, context)
     
@@ -1742,14 +1841,16 @@ async def main() -> None:
         entry_points=[
             CommandHandler("admin", lambda u, c: admin_command_entry(u, c, command_handler=admin_panel), filters=filters.User(ADMIN_IDS)),
             CommandHandler("info", lambda u, c: admin_command_entry(u, c, command_handler=info_command), filters=filters.User(ADMIN_IDS)),
+            CommandHandler("testm", lambda u, c: admin_command_entry(u, c, command_handler=test_message_command), filters=filters.User(ADMIN_IDS)), # ДОДАНО /testm
         ],
         states={
             WAITING_FOR_ADMIN_CONTACT: [MessageHandler(filters.CONTACT & filters.User(ADMIN_IDS), receive_admin_contact)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)]
+        fallbacks=[CommandHandler('cancel', cancel)],
+        allow_reentry=True # Дозволяємо перевхід, щоб після реєстрації контакту викликати наступний хендлер
     )
 
-    # ОКРЕМИЙ ХЕНДЛЕР ДЛЯ /TESTM (виправлення проблеми користувача)
+    # ОКРЕМИЙ ХЕНДЛЕР ДЛЯ /TESTM 
     testm_conv = ConversationHandler(
         entry_points=[CommandHandler("testm", test_message_command, filters=filters.User(ADMIN_IDS))],
         states={
@@ -1789,9 +1890,8 @@ async def main() -> None:
     application.add_handler(create_news_conv)
     application.add_handler(schedule_news_conv)
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
-    # application.add_handler(user_conv) # ПОМИЛКА: user_conv має бути останній, якщо він catch-all
-
-    # ВИПРАВЛЕНО: Реєстрація user_conv (який ловить всі повідомлення, що не є командами) в кінці.
+    
+    # Реєстрація user_conv (який ловить всі повідомлення, що не є командами) в кінці.
     application.add_handler(user_conv)
 
 
