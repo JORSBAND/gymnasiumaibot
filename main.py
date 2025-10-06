@@ -546,7 +546,7 @@ async def start_kb_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     await query.message.reply_text(
         f"Редагування запису.\n**Ключ:** `{key_to_edit}`\n"
-        f"**Поточне значення:** `{current_value}`\n\n"
+        "**Поточне значення:** " + ("`{}`".format(current_value) if len(current_value) < 50 else "_надто довге, див. базу_") + "\n\n"
         "Введіть нове значення для цього ключа.\n\n/cancel для скасування.",
         parse_mode='Markdown'
     )
@@ -916,17 +916,17 @@ async def auto_ai_reply_if_possible(context: ContextTypes.DEFAULT_TYPE, user_inf
     
     # 2. Перевіряємо, чи є в контексті хоча б щось релевантне
     # (Це приблизний індикатор того, чи буде ШІ відповідати на основі бази знань/сайту, а не загальних знань)
-    is_context_relevant = 'Контекст з бази даних' in additional_context or 'Контекст зі сторінки вчителів' in additional_context or 'Контекст з головної сторінки сайту' in additional_context
+    is_context_relevant = 'Контекст з бази даних' in additional_context and 'Нічого релевантного не знайдено' not in additional_context
 
     if not is_context_relevant:
-        logger.info(f"Для користувача {user_id} не знайдено релевантного контексту. Перенаправлення до адміна.")
+        logger.info(f"Для користувача {user_id} не знайдено релевантного контексту (KB). Перенаправлення до адміна.")
         return False
 
     # 3. Генеруємо відповідь
     prompt = (
         "Ти — корисний асистент для адміністратора шкільного телеграм-каналу. Дай відповідь на запитання користувача. "
-        "Обов'язково використовуй наданий контекст. Якщо контексту недостатньо, вкажи, що ти шукав у базі, але відповіді не знайшов. "
-        "Відповідь має бути короткою та ввічливою.\n\n"
+        "Обов'язково використовуй наданий контекст. Відповідь має бути короткою та ввічливою. "
+        "Якщо ти не впевнений у відповіді, повідом, що краще звернутися до адміністратора.\n\n"
         f"--- КОНТЕКСТ (з сайту та бази знань) ---\n{additional_context}\n\n"
         f"--- ЗАПИТАННЯ КОРИСТУВАЧА ---\n'{user_message}'\n\n"
         f"--- ВІДПОВІДЬ ---\n"
@@ -1897,18 +1897,19 @@ async def main() -> None: # Зроблено асинхронною
     # --- Запуск JobQueue та Long Polling ---
     
     # Ініціалізація та налаштування JobQueue
+    await application.initialize() # Запускаємо ініціалізацію перед JobQueue
     kyiv_timezone = pytz.timezone("Europe/Kyiv")
     application.job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
     
     logger.info("Бот запущено через Long Polling.")
     
     # Запуск polling. Цей метод сам керує циклом подій.
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == '__main__':
     try:
-        # Використовуємо синхронний виклик run_polling, обгорнений у try/except
-        main()
+        # Коректний виклик асинхронної функції
+        asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот зупинено вручну.")
