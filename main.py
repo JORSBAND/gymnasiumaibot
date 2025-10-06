@@ -1743,12 +1743,11 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
     
     return ConversationHandler.END
 
-async def main() -> None:
+def main() -> None: # Зроблено синхронною
     # --- Створення та налаштування Application ---
-    # Перемикання на long-polling
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # --- Налаштування даних бота ---
+    # --- Налаштування даних бота та обробників ---
     raw_user_ids = load_data('user_ids.json', [])
     application.bot_data['user_ids'] = set(raw_user_ids)
     application.bot_data['anonymous_map'] = {}
@@ -1896,18 +1895,26 @@ async def main() -> None:
 
 
     # --- Запуск JobQueue та Long Polling ---
-    await application.initialize()
     
-    # Запускаємо фонові задачі (JobQueue)
+    # Використовуємо тимчасову асинхронну функцію для ініціалізації
+    async def init_application():
+        await application.initialize()
+
+    # Запускаємо ініціалізацію синхронно, дозволяючи PTB використовувати той же цикл
+    asyncio.run(init_application())
+    
+    # Set up job queue
     kyiv_timezone = pytz.timezone("Europe/Kyiv")
     application.job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
     
     logger.info("Бот запущено через Long Polling.")
-    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+    
+    # Запускаємо polling синхронно, дозволяючи PTB керувати життєвим циклом циклу подій
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == '__main__':
     try:
-        asyncio.run(main())
+        main() # Виклик синхронної функції main()
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот зупинено вручну.")
