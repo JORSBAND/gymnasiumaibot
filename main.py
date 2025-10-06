@@ -5,34 +5,26 @@ import json
 import logging
 from datetime import datetime, time as dt_time
 import google.generativeai as genai
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes,
     CallbackQueryHandler, ConversationHandler
 )
-# Не забудьте встановити: pip install python-telegram-bot google-generativeai requests beautifulsoup4 pytz aiohttp aiohttp_cors
+# Не забудьте встановити: pip install python-telegram-bot google-generativeai requests beautifulsoup4 pytz firebase-admin
 import requests
 from bs4 import BeautifulSoup
 import pytz
 from typing import Any, Callable, Dict
 import re
 import hashlib
-from urllib.parse import parse_qs
-
-# --- Веб-сервер імпорти ---
-from aiohttp import web, WSMsgType
-import aiohttp_cors
 
 # --- Налаштування ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8223675237:AAF_kmo6SP4XZS23NeXWFxgkQNUaEZOWNx0")
-GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEcX6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyBtIxTceQYA6UAUyr9R0RrQWQzFNEnWXYA")
+GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEcX6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyBtIxTceQYA6UAUyr9R0RrWQQzFNEnWXYA")
 GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.strip()]
 CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c6912fc52ccb303667c92687")
 CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "v6HjMgCHEqTiElwnW_hK73j1uqQKud1fG-rPInWD")
 STABILITY_AI_API_KEY = os.environ.get("STABILITY_AI_API_KEY", "sk-uDtr8UAPxC7JHLG9QAyXt9s4QY142fkbOQA7uZZEgjf99iWp")
-# ВАЖЛИВО: Ваша публічна URL-адреса на Render
-WEBHOOK_URL = f"https://gymnasiumaibot.onrender.com/{TELEGRAM_BOT_TOKEN}"
-
 
 ADMIN_IDS = [
     838464083,
@@ -42,7 +34,6 @@ ADMIN_IDS = [
 ]
 GYMNASIUM_URL = "https://brodygymnasium.e-schools.info"
 TARGET_CHANNEL_ID = -1002946740131
-NOTIFIED_ADMINS_FILE = 'notified_admins.json'
 ADMIN_CONTACTS_FILE = 'admin_contacts.json'
 CONVERSATIONS_FILE = 'conversations.json'
 SCHEDULED_POSTS_FILE = 'scheduled_posts.json'
@@ -51,10 +42,6 @@ SCHEDULED_POSTS_FILE = 'scheduled_posts.json'
 # Логування
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# --- Глобальні змінні для веб-сервера ---
-active_websockets: Dict[str, web.WebSocketResponse] = {}
-web_sessions: Dict[str, Dict] = {} 
 
 # --- Утиліти для збереження/зчитування JSON ---
 def load_data(filename: str, default_type: Any = None) -> Any:
@@ -74,393 +61,30 @@ def save_data(data: Any, filename: str) -> None:
     except Exception as e:
         logger.error(f"Помилка save_data({filename}): {e}")
 
-# --- Web App Утиліти ---
-def get_user_from_init_data(init_data_str: str) -> dict | None:
-    try:
-        params = parse_qs(init_data_str)
-        if 'user' in params:
-            return json.loads(params['user'][0])
-    except Exception:
-        return None
-    return None
-
-async def get_user_context(request: web.Request) -> dict | None:
-    data = await request.json()
-    init_data = data.get('initData')
-    session_token = data.get('sessionToken')
-    
-    user_info = None
-    if init_data: user_info = get_user_from_init_data(init_data)
-    elif session_token and session_token in web_sessions: user_info = web_sessions[session_token]
-    
-    if not user_info:
-        raise web.HTTPUnauthorized()
-    
-    user_id = user_info.get('id')
-    is_admin = False
-    if isinstance(user_id, int):
-        is_admin = user_id in ADMIN_IDS
-    elif isinstance(user_id, str):
-        is_admin = str(user_id) in [str(admin_id) for admin_id in ADMIN_IDS]
-    
-    if not is_admin and str(user_id) not in web_sessions:
-        raise web.HTTPForbidden()
-    
-    user_info['isAdmin'] = is_admin
-    return user_info
-
-
+# --- Відповідь користувачу (виключно через Telegram) ---
 async def send_reply_to_user(ptb_app: Application, user_id: str | int, text: str):
     conversations = load_data(CONVERSATIONS_FILE, {})
     user_id_str = str(user_id)
     if user_id_str not in conversations: conversations[user_id_str] = []
     conversations[user_id_str].append({"sender": "bot", "text": text, "timestamp": datetime.now().isoformat()})
     save_data(conversations, CONVERSATIONS_FILE)
-
-    if user_id_str in active_websockets:
-        try:
-            await active_websockets[user_id_str].send_json({'type': 'message', 'payload': {'text': text}})
-            logger.info(f"Надіслано відповідь через WS користувачу {user_id_str}")
-        except Exception as e:
-            logger.warning(f"WS send failed for {user_id_str}: {e}")
             
-    if isinstance(user_id, int):
-        try:
-            await ptb_app.bot.send_message(chat_id=user_id, text=text)
-            logger.info(f"Надіслано відповідь через Telegram користувачу {user_id}")
-        except Exception as e:
-             logger.error(f"Не вдалося надіслати в Telegram користувачу {user_id}: {e}")
-
-# --- Web App Обробники ---
-async def handle_telegram_webhook(request: web.Request) -> web.Response:
-    """Обробляє вхідні оновлення від Telegram."""
-    application = request.app['ptb_app']
     try:
-        data = await request.json()
-        update = Update.de_json(data, application.bot)
-        await application.process_update(update)
-        return web.Response()
-    except json.JSONDecodeError:
-        logger.warning("Не вдалося розпарсити JSON з вебхука Telegram.")
-        return web.Response(status=400)
+        # Використовуємо Markdown для форматування
+        await ptb_app.bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
+        logger.info(f"Надіслано відповідь через Telegram користувачу {user_id}")
     except Exception as e:
-        logger.error(f"Помилка в обробнику вебхука: {e}")
-        return web.Response(status=500)
-
-async def handle_websocket(request: web.Request) -> web.WebSocketResponse:
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    user_id = None
-    async for msg in ws:
-        if msg.type == WSMsgType.TEXT:
-            try:
-                data = json.loads(msg.data)
-                if data.get('type') == 'auth':
-                    payload = data.get('payload', {})
-                    init_data = payload.get('initData')
-                    session_token = payload.get('sessionToken')
-                    
-                    user_info = None
-                    if init_data:
-                        user_info = get_user_from_init_data(init_data)
-                    elif session_token and session_token in web_sessions:
-                        user_info = web_sessions[session_token]
-
-                    if user_info:
-                        user_id = str(user_info.get('id'))
-                        active_websockets[user_id] = ws
-                        await ws.send_json({'type': 'auth_ok', 'payload': {'userId': user_id}})
-                        logger.info(f"WebSocket для користувача {user_id} аутентифіковано.")
-                    else:
-                        await ws.send_json({'type': 'error', 'payload': {'message': 'Authentication failed'}})
-                        await ws.close()
-                        return ws
-            except Exception as e:
-                logger.error(f"Помилка обробки WS повідомлення: {e}")
-
-    if user_id and user_id in active_websockets:
-        del active_websockets[user_id]
-    logger.info(f"WebSocket для користувача {user_id} закрито.")
-    return ws
-
-async def handle_api_init(request: web.Request) -> web.Response:
-    data = await request.json()
-    init_data, session_token = data.get('initData'), data.get('sessionToken')
-    
-    user = None
-    if init_data: user = get_user_from_init_data(init_data)
-    elif session_token and session_token in web_sessions: user = web_sessions[session_token]
-    
-    if not user: return web.json_response({'authStatus': 'required'})
-
-    user_id_str = str(user['id'])
-    history = load_data(CONVERSATIONS_FILE, {}).get(user_id_str, [])
-    
-    is_admin = False
-    if isinstance(user['id'], int):
-        is_admin = user['id'] in ADMIN_IDS
-    elif isinstance(user['id'], str):
-        is_admin = str(user['id']) in [str(admin_id) for admin_id in ADMIN_IDS]
-
-    response_data = {'user': user, 'isAdmin': is_admin, 'history': history}
-    if session_token: response_data['sessionToken'] = session_token
-    return web.json_response(response_data)
+         logger.error(f"Не вдалося надіслати в Telegram користувачу {user_id}: {e}")
 
 
-async def handle_api_login(request: web.Request) -> web.Response:
-    data = await request.json()
-    name, user_class = data.get('name'), data.get('class')
-    if not name or not user_class: return web.json_response({'error': 'Name and class required'}, status=400)
-    
-    session_token, user_id = uuid.uuid4().hex, f"web-{uuid.uuid4().hex[:8]}"
-    user_data = {'id': user_id, 'first_name': name, 'username': f"{name} ({user_class})"}
-    web_sessions[session_token] = user_data
-    return web.json_response({'user': user_data, 'sessionToken': session_token})
-
-async def handle_send_message_web(request: web.Request) -> web.Response:
-    user = await get_user_context(request)
-    data = await request.json()
-    text = data.get('text')
-    if not user or not text: return web.json_response({'error': 'Auth or text missing'}, status=400)
-    
-    user_id, user_name = str(user['id']), user.get('first_name', 'User')
-    
-    conversations = load_data(CONVERSATIONS_FILE, {})
-    if user_id not in conversations: conversations[user_id] = []
-    conversations[user_id].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
-    save_data(conversations, CONVERSATIONS_FILE)
-
-    forward_text = (f"📩 **Нове звернення (з Web App)**\n\n"
-                    f"**Від:** {user_name} (ID: {user_id})\n\n"
-                    f"**Текст:**\n---\n{text}")
-    
-    keyboard = [
-        [InlineKeyboardButton("Відповісти за допомогою ШІ 🤖", callback_data=f"ai_reply:{user_id}")],
-        [InlineKeyboardButton("Відповісти особисто ✍️", callback_data=f"manual_reply:{user_id}")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    for admin_id in ADMIN_IDS:
-        await request.app['ptb_app'].bot.send_message(chat_id=admin_id, text=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
-    return web.json_response({'status': 'ok'})
-
-# --- Web App Admin Обробники ---
-async def admin_action_wrapper(request: web.Request, action: Callable):
-    user = None
-    try:
-        user = await get_user_context(request)
-    except (web.HTTPUnauthorized, web.HTTPForbidden):
-        return web.json_response({'error': 'Unauthorized'}, status=403)
-    if not user.get('isAdmin'):
-         return web.json_response({'error': 'Unauthorized'}, status=403)
-    return await action(request)
-
-async def get_stats_web(request: web.Request):
-    user_count = len(load_data('user_ids.json', []))
-    return web.json_response({'user_count': user_count})
-
-async def get_kb_view_web(request: web.Request):
-    return web.json_response(load_data('knowledge_base.json', {}))
-
-async def add_kb_entry_web(request: web.Request):
-    data = await request.json()
-    key = data.get('key')
-    value = data.get('value')
-    if not key or not value: return web.json_response({'error': 'Key and value required'}, status=400)
-    
-    kb = load_data('knowledge_base.json', {}) or {}
-    if not isinstance(kb, dict): kb = {}
-    kb[key] = value
-    save_data(kb, 'knowledge_base.json')
-    return web.json_response({'status': 'ok'})
-
-async def edit_kb_entry_web(request: web.Request):
-    data = await request.json()
-    key = data.get('key')
-    value = data.get('value')
-    if not key or not value: return web.json_response({'error': 'Key and value required'}, status=400)
-
-    kb = load_data('knowledge_base.json', {}) or {}
-    if not isinstance(kb, dict) or key not in kb: return web.json_response({'error': 'Key not found'}, status=404)
-    kb[key] = value
-    save_data(kb, 'knowledge_base.json')
-    return web.json_response({'status': 'ok'})
-
-async def delete_kb_entry_web(request: web.Request):
-    data = await request.json()
-    key = data.get('key')
-    if not key: return web.json_response({'error': 'Key required'}, status=400)
-
-    kb = load_data('knowledge_base.json', {}) or {}
-    if not isinstance(kb, dict) or key not in kb: return web.json_response({'error': 'Key not found'}, status=404)
-    del kb[key]
-    save_data(kb, 'knowledge_base.json')
-    return web.json_response({'status': 'ok'})
-
-async def broadcast_web(request: web.Request):
-    data = await request.json()
-    message = data.get('message')
-    if not message: return web.json_response({'error': 'Message required'}, status=400)
-    
-    ptb_app = request.app['ptb_app']
-    success, fail = await do_broadcast(ptb_app, text_content=message)
-    return web.json_response({'success': success, 'fail': fail})
-    
-async def get_conversations_web(request: web.Request):
-    conversations = load_data(CONVERSATIONS_FILE, {})
-    conv_list = []
-    for user_id, messages in conversations.items():
-        if messages:
-            user_name = f"User {user_id}"
-            if user_id.startswith('web-'):
-                for session in web_sessions.values():
-                    if str(session['id']) == user_id:
-                        user_name = session.get('first_name', user_name)
-                        break
-            
-            conv_list.append({
-                "user_id": user_id,
-                "user_name": user_name,
-                "last_message": messages[-1]['text'],
-                "timestamp": messages[-1]['timestamp']
-            })
-    conv_list.sort(key=lambda x: x['timestamp'], reverse=True)
-    return web.json_response({"conversations": conv_list[:10]})
-
-async def suggest_reply_web(request: web.Request):
-    data = await request.json()
-    user_id = data.get('user_id')
-    history = load_data(CONVERSATIONS_FILE, {}).get(str(user_id), [])
-    if not history: return web.json_response({"error": "No history found"}, status=404)
-    
-    history_text = "\n".join([f"{msg['sender']}: {msg['text']}" for msg in history[-5:]])
-    prompt = (
-        "Ти — помічник адміністратора шкільного чату. Проаналізуй історію переписки та запропонуй ввічливу та корисну відповідь від імені адміністратора. "
-        "Відповідь має бути короткою та по суті.\n\n"
-        f"ІСТОРІЯ:\n{history_text}\n\n"
-        "ЗАПРОПОНОВАНА ВІДПОВІДЬ:"
-    )
-    reply = await generate_text_with_fallback(prompt)
-    if not reply: return web.json_response({"error": "AI generation failed"}, status=500)
-    return web.json_response({"reply": reply})
-
-async def improve_text_web(request: web.Request):
-    data = await request.json()
-    text = data.get('text')
-    if not text: return web.json_response({"error": "Text is required"}, status=400)
-
-    prompt = (
-        "Перепиши цей текст, щоб він був більш цікавим, лаконічним та привабливим для оголошення в шкільному телеграм-каналі. "
-        "Збережи головну суть, але зроби стиль більш жвавим.\n\n"
-        f"ОРИГІНАЛЬНИЙ ТЕКСТ:\n{text}\n\n"
-        "ПОКРАЩЕНИЙ ТЕКСТ:"
-    )
-    improved_text = await generate_text_with_fallback(prompt)
-    if not improved_text: return web.json_response({"error": "AI generation failed"}, status=500)
-    return web.json_response({"improved_text": improved_text})
-
-async def create_news_post_web(request: web.Request):
-    data = await request.json()
-    text = data.get('text')
-    if not text: return web.json_response({"error": "Text is required"}, status=400)
-    
-    try:
-        summary_prompt = f"Перепиши цей текст, щоб він був цікавим та лаконічним постом для телеграм-каналу новин. Збережи головну суть. Текст:\n\n{text}"
-        processed_text = await generate_text_with_fallback(summary_prompt)
-        if not processed_text:
-            raise ValueError("Не вдалося обробити текст. Усі системи ШІ недоступні.")
-        
-        image_prompt_for_ai = f"Створи короткий опис (3-7 слів) англійською мовою для генерації зображення на основі цього тексту: {processed_text[:300]}"
-        image_prompt = await generate_text_with_fallback(image_prompt_for_ai)
-        image_bytes = await generate_image(image_prompt.strip() if image_prompt else "school news")
-        
-        image_url = f"data:image/jpeg;base64,{image_bytes.decode('utf-8')}" if image_bytes else None
-        
-        return web.json_response({'text': processed_text, 'image_url': image_url})
-    except Exception as e:
-        logger.error(f"Помилка при створенні новини через ШІ: {e}")
-        return web.json_response({'error': str(e)}, status=500)
-
-async def generate_site_post_web(request: web.Request):
-    try:
-        site_text = await asyncio.to_thread(get_all_text_from_website)
-        if not site_text:
-            raise ValueError("Не вдалося отримати дані з сайту.")
-
-        summary_prompt = (
-            "Проаналізуй наступний текст з веб-сайту. Створи з нього короткий, цікавий та інформативний пост для телеграм-каналу. "
-            "Виділи найголовнішу думку або новину. Пост має бути написаний українською мовою.\n\n"
-            f"--- ТЕКСТ З САЙТУ ---\n{site_text[:2500]}\n\n"
-            "--- ПОСТ ДЛЯ ТЕЛЕГРАМ-КАНАЛУ ---"
-        )
-        post_text = await generate_text_with_fallback(summary_prompt)
-        if not post_text:
-            raise ValueError("Не вдалося згенерувати текст поста. Усі системи ШІ недоступні.")
-        
-        image_prompt_for_ai = (
-            "На основі цього тексту, створи короткий опис (3-7 слів) англійською мовою для генерації зображення. Опис має бути символічним та мінімалістичним.\n\n"
-            f"Текст: {post_text[:300]}"
-        )
-        image_prompt = await generate_text_with_fallback(image_prompt_for_ai)
-        image_bytes = await generate_image(image_prompt.strip() if image_prompt else "school news")
-        image_url = f"data:image/jpeg;base64,{image_bytes.decode('utf-8')}" if image_bytes else None
-
-        return web.json_response({'text': post_text, 'image_url': image_url})
-    except Exception as e:
-        logger.error(f"Помилка при створенні поста з сайту: {e}")
-        return web.json_response({'error': str(e)}, status=500)
-
-async def schedule_news_web(request: web.Request):
-    data = await request.json()
-    text = data.get('text')
-    datetime_str = data.get('datetime')
-    
-    if not text or not datetime_str: return web.json_response({'error': 'Text and datetime required'}, status=400)
-
-    try:
-        kyiv_timezone = pytz.timezone("Europe/Kyiv")
-        schedule_time = datetime.fromisoformat(datetime_str)
-        schedule_time_aware = kyiv_timezone.localize(schedule_time)
-        
-        if schedule_time_aware < datetime.now(kyiv_timezone):
-            return web.json_response({'error': 'Scheduled time is in the past'}, status=400)
-
-        job_id = f"scheduled_post_{uuid.uuid4().hex[:10]}"
-        
-        scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
-        scheduled_posts.append({'id': job_id, 'text': text, 'time': schedule_time_aware.isoformat()})
-        save_data(scheduled_posts, SCHEDULED_POSTS_FILE)
-
-        request.app['ptb_app'].job_queue.run_once(scheduled_broadcast_job, when=schedule_time_aware, data={'text': text}, name=job_id)
-
-        return web.json_response({'status': 'ok', 'job_id': job_id})
-    except ValueError:
-        return web.json_response({'error': 'Invalid datetime format'}, status=400)
-
-async def view_scheduled_web(request: web.Request):
-    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
-    return web.json_response(scheduled_posts)
-
-async def cancel_scheduled_web(request: web.Request):
-    data = await request.json()
-    post_id = data.get('postId')
-    if not post_id: return web.json_response({'error': 'Post ID required'}, status=400)
-    
-    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
-    updated_list = [p for p in scheduled_posts if p['id'] != post_id]
-    save_data(updated_list, SCHEDULED_POSTS_FILE)
-
-    remove_job_if_exists(post_id, request.app['ptb_app'])
-    
-    return web.json_response({'status': 'ok'})
-
-# --- Генерація тексту ---
+# --- Генерація тексту (без змін, оскільки функціонал потрібен) ---
 async def generate_text_with_fallback(prompt: str) -> str | None:
     for api_key in GEMINI_API_KEYS:
         try:
             logger.info(f"Спроба використати Gemini API ключ, що закінчується на ...{api_key[-4:]}")
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel('gemini-1.5-flash')
+            # Замінено на to_thread для безпечної асинхронності
             response = await asyncio.to_thread(model.generate_content, prompt, request_options={'timeout': 45})
             if response.text:
                 logger.info("Успішна відповідь від Gemini.")
@@ -494,15 +118,15 @@ async def generate_text_with_fallback(prompt: str) -> str | None:
         logger.error(f"Резервний варіант Cloudflare AI також не спрацював: {e}")
         return None
 
-# --- Стани для ConversationHandler ---
+# --- Стани для ConversationHandler (вилучено WAITING_FOR_TEST_*) ---
 (SELECTING_CATEGORY, IN_CONVERSATION, WAITING_FOR_REPLY,
  WAITING_FOR_ANONYMOUS_MESSAGE, WAITING_FOR_ANONYMOUS_REPLY,
  WAITING_FOR_BROADCAST_MESSAGE, CONFIRMING_BROADCAST,
  WAITING_FOR_KB_KEY, WAITING_FOR_KB_VALUE, CONFIRMING_AI_REPLY,
  WAITING_FOR_NEWS_TEXT, CONFIRMING_NEWS_ACTION, WAITING_FOR_MEDIA,
- SELECTING_TEST_USER, WAITING_FOR_TEST_NAME, WAITING_FOR_TEST_ID,
- WAITING_FOR_TEST_MESSAGE, WAITING_FOR_ADMIN_CONTACT, WAITING_FOR_KB_EDIT_VALUE,
- WAITING_FOR_SCHEDULE_TEXT, WAITING_FOR_SCHEDULE_TIME, CONFIRMING_SCHEDULE_POST) = range(22)
+ WAITING_FOR_ADMIN_CONTACT, WAITING_FOR_KB_EDIT_VALUE,
+ WAITING_FOR_SCHEDULE_TEXT, WAITING_FOR_SCHEDULE_TIME, CONFIRMING_SCHEDULE_POST,
+ SELECTING_TEST_USER, WAITING_FOR_TEST_NAME, WAITING_FOR_TEST_ID, WAITING_FOR_TEST_MESSAGE) = range(22)
 
 
 # --- Сповіщення для адмінів ---
@@ -521,16 +145,12 @@ async def notify_other_admins(context: ContextTypes.DEFAULT_TYPE, replying_admin
                 logger.warning(f"Не вдалося надіслати сповіщення адміну {admin_id}: {e}")
 
 
-# --- Універсальний розсильник ---
-async def do_broadcast(context: ContextTypes.DEFAULT_TYPE | Application, text_content: str, photo: bytes | str | None = None, video: str | None = None) -> tuple[int, int]:
+# --- Універсальний розсильник (без змін) ---
+async def do_broadcast(context: ContextTypes.DEFAULT_TYPE, text_content: str, photo: bytes | str | None = None, video: str | None = None) -> tuple[int, int]:
     full_text_content = f"{text_content}"
     
-    if isinstance(context, Application):
-        bot = context.bot
-        user_ids = context.bot_data.get('user_ids', set())
-    else: # ContextTypes.DEFAULT_TYPE
-        bot = context.bot
-        user_ids = context.bot_data.get('user_ids', set())
+    bot = context.bot
+    user_ids = context.bot_data.get('user_ids', set())
 
     success, fail = 0, 0
     for user_id in user_ids:
@@ -540,6 +160,7 @@ async def do_broadcast(context: ContextTypes.DEFAULT_TYPE | Application, text_co
             elif video:
                 await bot.send_video(user_id, video=video, caption=full_text_content, parse_mode='Markdown')
             else:
+                # Обробка довгих повідомлень
                 if len(full_text_content) > 4096:
                     for i in range(0, len(full_text_content), 4096):
                         await bot.send_message(user_id, text=full_text_content[i:i + 4096])
@@ -552,6 +173,7 @@ async def do_broadcast(context: ContextTypes.DEFAULT_TYPE | Application, text_co
             fail += 1
     return success, fail
 
+# --- Генерація зображення (без змін) ---
 async def generate_image(prompt: str) -> bytes | None:
     api_url = "https://api.stability.ai/v2beta/stable-image/generate/core"
     headers = {
@@ -582,6 +204,8 @@ async def generate_image(prompt: str) -> bytes | None:
     except Exception as e:
         logger.error(f"Невідома помилка при генерації зображення: {e}")
         return None
+
+# --- Парсинг веб-сайту (без змін) ---
 def get_all_text_from_website() -> str | None:
     try:
         base = GYMNASIUM_URL.rstrip('/')
@@ -607,6 +231,7 @@ def get_all_text_from_website() -> str | None:
     except Exception as e:
         logger.error(f"Невідома помилка при парсингу сайту: {e}")
         return None
+
 def get_teachers_info() -> str | None:
     try:
         url = "https://brodygymnasium.e-schools.info/teachers"
@@ -634,6 +259,8 @@ def get_teachers_info() -> str | None:
     except Exception as e:
         logger.error(f"Невідома помилка при парсингу сторінки вчителів: {e}")
         return None
+
+# --- Збір контексту для ШІ (без змін) ---
 async def gather_all_context(query: str) -> str:
     teacher_keywords = ['вчител', 'викладач', 'директор', 'завуч']
     is_teacher_query = any(keyword in query.lower() for keyword in teacher_keywords)
@@ -664,6 +291,8 @@ async def gather_all_context(query: str) -> str:
         context_parts.append("**Контекст з бази даних:**\nНічого релевантного не знайдено.")
 
     return "\n\n".join(context_parts)
+
+# --- Функції перевірки оновлень сайту (без змін) ---
 async def check_website_for_updates(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Виконую щоденну перевірку оновлень на сайті...")
     new_text = get_all_text_from_website()
@@ -678,6 +307,7 @@ async def check_website_for_updates(context: ContextTypes.DEFAULT_TYPE):
         logger.info("Знайдено оновлення на сайті!")
         save_data({'text': new_text, 'timestamp': datetime.now().isoformat()}, 'website_content.json')
         await propose_website_update(context, new_text)
+
 async def propose_website_update(context: ContextTypes.DEFAULT_TYPE, text_content: str):
     truncated_text = text_content[:800] + "..." if len(text_content) > 800 else text_content
     broadcast_id = f"website_update_{uuid.uuid4().hex[:8]}"
@@ -696,6 +326,7 @@ async def propose_website_update(context: ContextTypes.DEFAULT_TYPE, text_conten
             )
         except Exception as e:
             logger.error(f"Не вдалося надіслати оновлення сайту адміну {admin_id}: {e}")
+
 async def website_update_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -718,6 +349,9 @@ async def website_update_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     if broadcast_id in context.bot_data:
         del context.bot_data[broadcast_id]
+
+# --- Команди адміністратора та користувача ---
+
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     keyboard = [
         [
@@ -738,7 +372,9 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ]
     ]
     await update.message.reply_text("🔐 **Адміністративна панель:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Оновлено інструкцію, вилучено згадку про веб-додаток та оновлено команди
     info_text_1 = (
         "🔐 **Інструкція для Адміністратора**\n\n"
         "Ось повний перелік функцій та команд, доступних для вас:\n\n"
@@ -746,7 +382,7 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**Основні Команди**\n\n"
         "• `/admin` - Відкриває головну адміністративну панель.\n"
         "• `/info` - Показує цю інструкцію.\n"
-        "• `/faq` - Показує список поширених запитань з бази знань.\n"
+        "• `/faq` - Показує список поширених запитань з бази знань (також доступна користувачам).\n"
         "• `/testm` - Запускає процес створення тестового звернення для перевірки."
     )
     info_text_2 = (
@@ -775,10 +411,7 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "**Тестові Команди**\n\n"
         "• `/testsite` - Перевіряє доступ до сайту гімназії.\n"
         "• `/testai` - Перевіряє роботу ШІ.\n"
-        "• `/testimage` - Перевіряє генерацію зображень.\n\n"
-        "--- \n"
-        "**Важливо:**\n"
-        "• Адміністратори не можуть створювати звернення через загальний функціонал, щоб уникнути плутанини. Використовуйте `/testm` для тестування."
+        "• `/testimage` - Перевіряє генерацію зображень.\n"
     )
     await update.message.reply_text(info_text_1, parse_mode='Markdown')
     await asyncio.sleep(0.2)
@@ -787,22 +420,41 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(info_text_3, parse_mode='Markdown')
     await asyncio.sleep(0.2)
     await update.message.reply_text(info_text_4, parse_mode='Markdown')
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Нова команда для користувачів
+    if update.effective_user.id in ADMIN_IDS:
+        await update.message.reply_text("Ви адміністратор. Використовуйте `/admin` для доступу до панелі або `/info` для інструкції.")
+        return
+        
+    await update.message.reply_text(
+        "Я — бот-помічник Бродівської гімназії.\n\n"
+        "**Основні функції:**\n"
+        "• **Надіслати повідомлення адміністратору:** Просто напишіть ваше запитання, пропозицію чи скаргу.\n"
+        "• **Анонімне звернення:** Використовуйте команду `/anonymous`.\n"
+        "• **Поширені запитання:** Використовуйте команду `/faq`."
+    )
+
 async def admin_stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
     await query.answer()
     user_count = len(context.bot_data.get('user_ids', set()))
     await query.edit_message_text(f"📊 **Статистика бота:**\n\nВсього унікальних користувачів: {user_count}", parse_mode='Markdown')
+
+# --- Логіка Бази знань (KB) (без змін) ---
 async def start_kb_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
     await query.answer()
     await query.edit_message_text("Введіть **ключ** для нових даних (наприклад, 'Директор').\n\nДля скасування введіть /cancel.", parse_mode='Markdown')
     return WAITING_FOR_KB_KEY
+
 async def get_kb_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.chat_data['kb_key'] = update.message.text
     await update.message.reply_text(f"Ключ '{update.message.text}' збережено. Тепер введіть **значення**.", parse_mode='Markdown')
     return WAITING_FOR_KB_VALUE
+
 async def get_kb_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     key = context.chat_data.pop('kb_key', None)
     value = update.message.text
@@ -815,6 +467,7 @@ async def get_kb_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     save_data(kb, 'knowledge_base.json')
     await update.message.reply_text(f"✅ Дані успішно збережено!\n\n**{key}**: {value}", parse_mode='Markdown')
     return ConversationHandler.END
+
 async def view_kb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -851,6 +504,7 @@ async def view_kb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode='Markdown'
         )
         await asyncio.sleep(0.1)
+
 async def delete_kb_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -869,6 +523,7 @@ async def delete_kb_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text(f"✅ Запис з ключем `{key_to_delete}` видалено.", parse_mode='Markdown')
     else:
         await query.edit_message_text(f"❌ Помилка: запис з ключем `{key_to_delete}` не знайдено (можливо, вже видалено).", parse_mode='Markdown')
+
 async def start_kb_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -893,6 +548,7 @@ async def start_kb_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     )
     
     return WAITING_FOR_KB_EDIT_VALUE
+
 async def get_kb_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     key_to_edit = context.chat_data.pop('key_to_edit', None)
     new_value = update.message.text
@@ -909,6 +565,8 @@ async def get_kb_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     await update.message.reply_text(f"✅ Запис успішно оновлено!\n\n**{key_to_edit}**: {new_value}", parse_mode='Markdown')
     return ConversationHandler.END
+
+# --- FAQ для користувачів (без змін) ---
 async def faq_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     kb = load_data('knowledge_base.json') or {}
     if not kb or not isinstance(kb, dict):
@@ -931,6 +589,7 @@ async def faq_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     reply_markup = InlineKeyboardMarkup(buttons)
     await update.message.reply_text("Ось список поширених запитань:", reply_markup=reply_markup)
+
 async def faq_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -949,6 +608,16 @@ async def faq_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.message.reply_text(f"**{key}**\n\n{answer}", parse_mode='Markdown')
     else:
         await query.message.reply_text("Відповідь на це питання не знайдено.")
+
+# --- Планування та розсилка (без змін) ---
+def remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    current_jobs = context.job_queue.get_jobs_by_name(name)
+    if not current_jobs:
+        return False
+    for job in current_jobs:
+        job.schedule_removal()
+    return True
+
 async def scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     job_data = context.job.data
     logger.info(f"Виконую заплановану розсилку: {job_data.get('text', '')[:30]}")
@@ -962,18 +631,12 @@ async def scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     updated_posts = [p for p in scheduled_posts if p.get('id') != context.job.name]
     save_data(updated_posts, SCHEDULED_POSTS_FILE)
 
-def remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    current_jobs = context.job_queue.get_jobs_by_name(name)
-    if not current_jobs:
-        return False
-    for job in current_jobs:
-        job.schedule_removal()
-    return True
 async def start_schedule_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Надішліть текст для запланованої новини. /cancel для скасування.")
     return WAITING_FOR_SCHEDULE_TEXT
+
 async def get_schedule_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.chat_data['schedule_text'] = update.message.text
     context.chat_data['schedule_photo'] = None 
@@ -987,6 +650,7 @@ async def get_schedule_text(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         parse_mode='Markdown'
     )
     return WAITING_FOR_SCHEDULE_TIME
+
 async def get_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     time_str = update.message.text
     kyiv_timezone = pytz.timezone("Europe/Kyiv")
@@ -1026,6 +690,7 @@ async def get_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             "Наприклад: `25.12.2024 18:30`"
         )
         return WAITING_FOR_SCHEDULE_TIME
+
 async def confirm_schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -1054,12 +719,14 @@ async def confirm_schedule_post(update: Update, context: ContextTypes.DEFAULT_TY
     
     context.chat_data.clear()
     return ConversationHandler.END
+
 async def cancel_schedule_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Планування скасовано.")
     context.chat_data.clear()
     return ConversationHandler.END
+
 async def view_scheduled_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -1090,6 +757,7 @@ async def view_scheduled_posts(update: Update, context: ContextTypes.DEFAULT_TYP
             parse_mode='Markdown'
         )
         await asyncio.sleep(0.1)
+
 async def cancel_scheduled_job_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -1104,6 +772,8 @@ async def cancel_scheduled_job_button(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text("✅ Заплановану розсилку скасовано.")
     else:
         await query.edit_message_text("❌ Цей пост вже було надіслано або скасовано раніше.")
+
+# --- Генерація поста з сайту (без змін) ---
 async def generate_post_from_site(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -1161,6 +831,7 @@ async def generate_post_from_site(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text(f"❌ *Сталася помилка:* {e}")
         except:
             await context.bot.send_message(query.from_user.id, f"❌ *Сталася помилка:* {e}")
+
 async def handle_post_broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
@@ -1191,6 +862,7 @@ async def handle_post_broadcast_confirmation(update: Update, context: ContextTyp
 
     if post_data_key in context.bot_data:
         del context.bot_data[post_data_key]
+
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     post = update.channel_post
     if not post or post.chat.id != TARGET_CHANNEL_ID: return
@@ -1201,21 +873,31 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.bot_data['channel_posts'] = []
     context.bot_data['channel_posts'].insert(0, post_text)
     context.bot_data['channel_posts'] = context.bot_data['channel_posts'][:20]
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id in ADMIN_IDS:
-        await admin_command_entry(update, context, command_handler=admin_panel)
-        return
 
+# --- Команда /start для користувачів ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if 'user_ids' not in context.bot_data:
         context.bot_data['user_ids'] = set()
     context.bot_data['user_ids'].add(update.effective_user.id)
     save_data(list(context.bot_data['user_ids']), 'user_ids.json')
+    
+    if update.effective_user.id in ADMIN_IDS:
+         await update.message.reply_text(
+            'Вітаємо! Ви адміністратор.\n\n'
+            'Для доступу до панелі використовуйте команду /admin.\n'
+            'Для інструкцій використовуйте /info.'
+        )
+         return
+
     await update.message.reply_text(
         'Вітаємо! Це офіційний бот каналу новин Бродівської гімназії.\n\n'
         '➡️ Напишіть ваше запитання або пропозицію, щоб відправити її адміністратору.\n'
         '➡️ Використовуйте команду /anonymous, щоб надіслати анонімне звернення.\n'
-        '➡️ Використовуйте /faq для перегляду поширених запитань.'
+        '➡️ Використовуйте /faq для перегляду поширених запитань.\n'
+        '➡️ Використовуйте /help для повторного перегляду інструкції.'
     )
+
+# --- Логіка розмов користувачів (без змін, окрім видалення згадки web-ids) ---
 async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id in ADMIN_IDS:
         await update.message.reply_text("Адміністратори не можуть створювати звернення. Використовуйте /admin для доступу до панелі.")
@@ -1258,6 +940,7 @@ async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ]
     await update.message.reply_text("Будь ласка, оберіть категорію вашого звернення:", reply_markup=InlineKeyboardMarkup(keyboard))
     return SELECTING_CATEGORY
+
 async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -1296,6 +979,7 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     await query.edit_message_text("✅ Дякуємо! Ваше повідомлення надіслано. Якщо у вас є доповнення, просто напишіть їх наступним повідомленням.")
     return IN_CONVERSATION
+
 async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_info = context.user_data.get('user_info', {'id': update.effective_user.id, 'name': update.effective_user.full_name})
     category = context.user_data.get('category', 'Без категорії')
@@ -1334,9 +1018,12 @@ async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TY
 
     await update.message.reply_text("✅ Доповнення надіслано.")
     return IN_CONVERSATION
+
+# --- Анонімне звернення (без змін) ---
 async def anonymous_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.message.reply_text("Напишіть ваше анонімне повідомлення... Для скасування введіть /cancel.")
     return WAITING_FOR_ANONYMOUS_MESSAGE
+
 async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     anon_id = str(uuid.uuid4())[:8]
     user_id = update.effective_user.id
@@ -1367,6 +1054,8 @@ async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAUL
             logger.error(f"Не вдалося переслати анонімне адміну {admin_id}: {e}")
     await update.message.reply_text("✅ Ваше анонімне повідомлення надіслано.")
     return ConversationHandler.END
+
+# --- Розсилка (без змін) ---
 async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if query:
@@ -1374,6 +1063,7 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("Напишіть повідомлення для розсилки. /cancel для скасування.")
         return WAITING_FOR_BROADCAST_MESSAGE
     return ConversationHandler.END
+
 async def get_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.chat_data['broadcast_message'] = update.message.text
     user_count = len(context.bot_data.get('user_ids', set()))
@@ -1386,6 +1076,7 @@ async def get_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TY
         reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
     )
     return CONFIRMING_BROADCAST
+
 async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
@@ -1396,6 +1087,7 @@ async def send_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await query.edit_message_text(f"✅ Розсилку завершено.\nНадіслано: {success}\nПомилок: {fail}")
     context.chat_data.clear()
     return ConversationHandler.END
+
 async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if query:
@@ -1403,6 +1095,8 @@ async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.edit_message_text("Розсилку скасовано.")
     context.chat_data.clear()
     return ConversationHandler.END
+
+# --- Відповіді адміністратора (вилучено web-related logic) ---
 async def start_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
@@ -1458,6 +1152,7 @@ async def start_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 parse_mode='Markdown'
             )
             return ConversationHandler.END
+
 async def send_ai_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
@@ -1472,7 +1167,8 @@ async def send_ai_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TY
         return ConversationHandler.END
 
     try:
-        target_user_id_typed = int(target_user_id) if str(target_user_id).isdigit() else target_user_id
+        # User ID is now always expected to be an int (Telegram user)
+        target_user_id_typed = int(target_user_id)
         await send_reply_to_user(context.application, target_user_id_typed, ai_response_text)
         await query.edit_message_text(text="✅ *Відповідь успішно надіслано.*", parse_mode='Markdown')
         await query.edit_message_reply_markup(reply_markup=None)
@@ -1483,6 +1179,7 @@ async def send_ai_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TY
 
     context.chat_data.clear()
     return ConversationHandler.END
+
 async def receive_manual_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     target_user_id = context.chat_data.get('target_user_id')
     original_message = context.chat_data.get('original_user_message', 'Невідоме звернення')
@@ -1493,7 +1190,8 @@ async def receive_manual_reply(update: Update, context: ContextTypes.DEFAULT_TYP
 
     owner_reply_text = update.message.text
     try:
-        target_user_id_typed = int(target_user_id) if str(target_user_id).isdigit() else target_user_id
+        # User ID is now always expected to be an int (Telegram user)
+        target_user_id_typed = int(target_user_id)
         await send_reply_to_user(context.application, target_user_id_typed, f"✉️ **Відповідь від адміністратора:**\n\n{owner_reply_text}")
         await update.message.reply_text("✅ Вашу відповідь надіслано.")
         await notify_other_admins(context, update.effective_user.id, original_message)
@@ -1502,7 +1200,9 @@ async def receive_manual_reply(update: Update, context: ContextTypes.DEFAULT_TYP
 
     context.chat_data.clear()
     return ConversationHandler.END
+
 async def start_anonymous_ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ... (аналогічна логіка)
     query = update.callback_query
     if not query: return ConversationHandler.END
     await query.answer()
@@ -1545,7 +1245,9 @@ async def start_anonymous_ai_reply(update: Update, context: ContextTypes.DEFAULT
         logger.error(f"Помилка генерації відповіді ШІ для аноніма: {e}")
         await query.edit_message_text(text=f"{original_text}\n\n❌ *Помилка генерації відповіді ШІ: {e}*", parse_mode='Markdown')
         return ConversationHandler.END
+
 async def send_anonymous_ai_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ... (аналогічна логіка)
     query = update.callback_query
     if not query: return ConversationHandler.END
     await query.answer()
@@ -1570,7 +1272,9 @@ async def send_anonymous_ai_reply_to_user(update: Update, context: ContextTypes.
 
     context.chat_data.clear()
     return ConversationHandler.END
+
 async def start_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ... (аналогічна логіка)
     query = update.callback_query
     if not query: return ConversationHandler.END
     await query.answer()
@@ -1583,7 +1287,9 @@ async def start_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TY
     
     await query.message.reply_text(f"✍️ Напишіть вашу відповідь для аноніма (ID: {anon_id}). /cancel для скасування.")
     return WAITING_FOR_ANONYMOUS_REPLY
+
 async def send_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ... (аналогічна логіка)
     anon_id = context.chat_data.get('anon_id_to_reply')
     user_id = context.bot_data.get('anonymous_map', {}).get(anon_id)
     original_message = context.chat_data.get('original_user_message', 'Невідоме анонімне звернення')
@@ -1601,7 +1307,9 @@ async def send_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text(f"❌ Не вдалося надіслати: {e}")
     context.chat_data.clear()
     return ConversationHandler.END
+
 async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # ... (аналогічна логіка, видалено web-reply)
     if update.effective_user.id not in ADMIN_IDS: return
     replied_message = update.message.reply_to_message
     if not replied_message or replied_message.from_user.id != context.bot.id: return
@@ -1610,11 +1318,11 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
     text_to_scan = replied_message.text or replied_message.caption or ""
     original_message = text_to_scan.split('---\n')[-1].strip()
     
-    match = re.search(r"\(ID: ([\w\-]+)\)", text_to_scan)
+    match = re.search(r"\(ID: (\d+)\)", text_to_scan) # Тільки числові ID
     if match:
         target_user_id_str = match.group(1)
         try: target_user_id = int(target_user_id_str)
-        except ValueError: target_user_id = target_user_id_str
+        except ValueError: target_user_id = None # Має бути int
         reply_intro = "✉️ **Відповідь від адміністратора:**"
     else:
         anon_match = re.search(r"\(ID: ([a-f0-9\-]+)\)", text_to_scan)
@@ -1628,13 +1336,11 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
     try:
         reply_text = update.message.text or update.message.caption or ""
         if update.message.photo or update.message.video:
-            if isinstance(target_user_id, str) and target_user_id.startswith('web-'):
-                 await send_reply_to_user(context.application, target_user_id, f"{reply_intro}\n\n{reply_text}\n\n(Адміністратор також надіслав медіа, яке неможливо відобразити тут)")
-            else:
-                 if update.message.photo:
-                    await context.bot.send_photo(chat_id=target_user_id, photo=update.message.photo[-1].file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
-                 elif update.message.video:
-                    await context.bot.send_video(chat_id=target_user_id, video=update.message.video.file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
+             # Логіка для медіа від адміна
+             if update.message.photo:
+                await context.bot.send_photo(chat_id=target_user_id, photo=update.message.photo[-1].file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
+             elif update.message.video:
+                await context.bot.send_video(chat_id=target_user_id, video=update.message.video.file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
         else:
             await send_reply_to_user(context.application, target_user_id, f"{reply_intro}\n\n{reply_text}")
 
@@ -1643,11 +1349,14 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
     except Exception as e:
         logger.error(f"Не вдалося надіслати пряму відповідь користувачу {target_user_id}: {e}")
         await update.message.reply_text(f"❌ Не вдалося надіслати: {e}", quote=True)
+
+# --- Створення новин (без змін) ---
 async def start_news_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Будь ласка, надішліть текст для вашої новини. /cancel для скасування.")
     return WAITING_FOR_NEWS_TEXT
+
 async def get_news_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.chat_data['news_text'] = update.message.text
     keyboard = [
@@ -1656,6 +1365,7 @@ async def get_news_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     ]
     await update.message.reply_text("Текст збережено. Як продовжити?", reply_markup=InlineKeyboardMarkup(keyboard))
     return CONFIRMING_NEWS_ACTION
+
 async def handle_news_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -1701,6 +1411,7 @@ async def handle_news_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif action == 'news_manual':
         await query.edit_message_text("Будь ласка, надішліть фото або відео для цього посту.")
         return WAITING_FOR_MEDIA
+
 async def get_news_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     news_text = context.chat_data.get('news_text')
     photo = update.message.photo[-1].file_id if update.message.photo else None
@@ -1722,6 +1433,8 @@ async def get_news_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_video(video=video, caption=caption, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     return ConversationHandler.END
+
+# --- Скасування операцій (без змін) ---
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     logger.info(f"Користувач {update.effective_user.id} викликав /cancel.")
     
@@ -1742,6 +1455,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=ReplyKeyboardRemove()
         )
         return ConversationHandler.END
+
+# --- Тестові команди (без змін) ---
 async def test_site_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and update.effective_user.id not in ADMIN_IDS: return
     await update.message.reply_text("🔍 *Запускаю тестову перевірку сайту...*")
@@ -1751,6 +1466,7 @@ async def test_site_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     message = f"✅ Успішно отримано {len(site_text)} символів з сайту.\n\n**Початок тексту:**\n\n{site_text[:500]}..."
     await update.message.reply_text(message)
+
 async def test_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and update.effective_user.id not in ADMIN_IDS: return
     await update.message.reply_text("🔍 *Тестую систему ШІ з резервуванням...*")
@@ -1759,6 +1475,7 @@ async def test_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(f"✅ Відповідь від ШІ:\n\n{response}")
     else:
         await update.message.reply_text("❌ Помилка: жоден із сервісів ШІ (Gemini, Cloudflare) не відповів.")
+
 async def test_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user and update.effective_user.id not in ADMIN_IDS: return
     await update.message.reply_text("🔍 *Тестую Stability AI API...*")
@@ -1771,7 +1488,22 @@ async def test_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logger.error(f"Помилка тестування Stability AI API: {e}")
         await update.message.reply_text(f"❌ Помилка Stability AI API: {e}")
+
+# --- Логіка команди /testm (виправлення) ---
 async def test_message_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # 1. Перевірка, чи є користувач адміністратором
+    if update.effective_user.id not in ADMIN_IDS:
+        await update.message.reply_text("Ця команда доступна лише для адміністраторів.")
+        return ConversationHandler.END
+        
+    # 2. Перевірка, чи зареєстровано контакт адміністратора
+    admin_contacts = load_data(ADMIN_CONTACTS_FILE)
+    if str(update.effective_user.id) not in admin_contacts:
+        await update.message.reply_text(
+            "Для тестування, будь ласка, спочатку ідентифікуйте себе командою `/admin`, щоб поділитися контактом. Це потрібно лише один раз."
+        )
+        return ConversationHandler.END
+
     keyboard = [
         [InlineKeyboardButton("Використати мої дані (тест)", callback_data="test_user_default")],
         [InlineKeyboardButton("Ввести дані вручну", callback_data="test_user_custom")]
@@ -1783,6 +1515,7 @@ async def test_message_command(update: Update, context: ContextTypes.DEFAULT_TYP
         parse_mode='Markdown'
     )
     return SELECTING_TEST_USER
+
 async def handle_test_user_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -1798,10 +1531,12 @@ async def handle_test_user_choice(update: Update, context: ContextTypes.DEFAULT_
     elif choice == 'test_user_custom':
         await query.edit_message_text("Будь ласка, введіть тимчасове **ім'я** користувача для тесту.\n\n/cancel для скасування.", parse_mode='Markdown')
         return WAITING_FOR_TEST_NAME
+
 async def get_test_name(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.chat_data['test_user_name'] = update.message.text
     await update.message.reply_text("Ім'я збережено. Тепер введіть тимчасовий **ID** користувача (лише цифри).\n\n/cancel для скасування.", parse_mode='Markdown')
     return WAITING_FOR_TEST_ID
+
 async def get_test_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id_text = update.message.text
     if not user_id_text.isdigit():
@@ -1814,6 +1549,7 @@ async def get_test_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 
     await update.message.reply_text("Дані збережено. Тепер надішліть тестове повідомлення (текст, фото або відео).\n\n/cancel для скасування.")
     return WAITING_FOR_TEST_MESSAGE
+
 async def receive_test_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_info = context.chat_data.get('test_user_info')
     if not user_info:
@@ -1861,45 +1597,27 @@ async def receive_test_message(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("✅ Тестове повідомлення надіслано всім адміністраторам.")
     context.chat_data.clear()
     return ConversationHandler.END
-async def notify_new_admins(application: Application) -> None:
-    notified_admins = load_data('admin_notified.json', [])
-    if not isinstance(notified_admins, list):
-        notified_admins = []
 
-    newly_notified = []
-    welcome_text = (
-        "Вітаємо! Тепер ви адміністратор цього бота.\n\n"
-        "Ви будете отримувати повідомлення від користувачів. Щоб користуватись адмін-панеллю, введіть команду: /admin\n\n"
-        "Якщо вам потрібна повна інструкція, скористайтесь командою /info"
-    )
-    for admin_id in ADMIN_IDS:
-        if admin_id not in notified_admins:
-            try:
-                await application.bot.send_message(chat_id=admin_id, text=welcome_text)
-                newly_notified.append(admin_id)
-                logger.info(f"Надіслано привітальне повідомлення новому адміну: {admin_id}")
-            except Exception as e:
-                logger.error(f"Не вдалося надіслати привітальне повідомлення адміну {admin_id}: {e}")
-
-    if newly_notified:
-        all_notified = notified_admins + newly_notified
-        save_data(all_notified, 'admin_notified.json')
+# --- Логіка ідентифікації адміністратора ---
 async def admin_command_entry(update: Update, context: ContextTypes.DEFAULT_TYPE, command_handler: Callable) -> int:
     user_id = update.effective_user.id
     admin_contacts = load_data(ADMIN_CONTACTS_FILE)
 
     if str(user_id) in admin_contacts:
+        # Адміністратор вже зареєстрований, виконуємо команду
         await command_handler(update, context)
         return ConversationHandler.END
     else:
+        # Адміністратор не зареєстрований, просимо поділитися контактом
         context.chat_data['next_step_handler'] = command_handler.__name__
         keyboard = [[KeyboardButton("Надіслати мій контакт 👤", request_contact=True)]]
         await update.message.reply_text(
-            "Для ідентифікації та коректної роботи сповіщень, будь ласка, поділіться вашим контактом.\n\n"
+            "Для ідентифікації та коректної роботи, будь ласка, поділіться вашим контактом.\n\n"
             "Це потрібно зробити лише один раз.",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
         )
         return WAITING_FOR_ADMIN_CONTACT
+
 async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     contact = update.message.contact
     user_id = contact.user_id
@@ -1918,26 +1636,25 @@ async def receive_admin_contact(update: Update, context: ContextTypes.DEFAULT_TY
         handler_map = {
             'admin_panel': admin_panel,
             'info_command': info_command,
-            'test_message_command': test_message_command,
         }
         handler_to_call = handler_map.get(next_handler_name)
         if handler_to_call:
-            if handler_to_call == test_message_command:
-                return await test_message_command(update, context)
-            else:
-                await handler_to_call(update, context)
+            # Для /admin та /info просто викликаємо функцію
+            await handler_to_call(update, context)
     
     return ConversationHandler.END
 
 async def main() -> None:
     # --- Створення та налаштування Application ---
+    # Перемикання на long-polling
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-    # --- Налаштування даних бота та обробників (без змін) ---
+    # --- Налаштування даних бота ---
     raw_user_ids = load_data('user_ids.json', [])
     application.bot_data['user_ids'] = set(raw_user_ids)
     application.bot_data['anonymous_map'] = {}
 
+    # --- Хендлери для користувачів ---
     user_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND | filters.PHOTO | filters.VIDEO, start_conversation)],
         states={
@@ -1951,6 +1668,8 @@ async def main() -> None:
         states={ WAITING_FOR_ANONYMOUS_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_anonymous_message)] },
         fallbacks=[CommandHandler('cancel', cancel)]
     )
+
+    # --- Хендлери для адміністраторів ---
     broadcast_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(start_broadcast, pattern='^admin_broadcast$')],
         states={
@@ -2017,14 +1736,23 @@ async def main() -> None:
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
-    admin_setup_conv = ConversationHandler(
+
+    # Хендлер для реєстрації контакту адміністратора (використовується для /admin та /info)
+    admin_contact_conv = ConversationHandler(
         entry_points=[
-            CommandHandler("admin", lambda u, c: admin_command_entry(u, c, command_handler=admin_panel)),
-            CommandHandler("info", lambda u, c: admin_command_entry(u, c, command_handler=info_command)),
-            CommandHandler("testm", lambda u, c: admin_command_entry(u, c, command_handler=test_message_command)),
+            CommandHandler("admin", lambda u, c: admin_command_entry(u, c, command_handler=admin_panel), filters=filters.User(ADMIN_IDS)),
+            CommandHandler("info", lambda u, c: admin_command_entry(u, c, command_handler=info_command), filters=filters.User(ADMIN_IDS)),
         ],
         states={
             WAITING_FOR_ADMIN_CONTACT: [MessageHandler(filters.CONTACT & filters.User(ADMIN_IDS), receive_admin_contact)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+
+    # ОКРЕМИЙ ХЕНДЛЕР ДЛЯ /TESTM (виправлення проблеми користувача)
+    testm_conv = ConversationHandler(
+        entry_points=[CommandHandler("testm", test_message_command, filters=filters.User(ADMIN_IDS))],
+        states={
             SELECTING_TEST_USER: [CallbackQueryHandler(handle_test_user_choice, pattern='^test_user_.*$')],
             WAITING_FOR_TEST_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_test_name)],
             WAITING_FOR_TEST_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_test_id)],
@@ -2034,12 +1762,14 @@ async def main() -> None:
     )
     
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command)) # ДОДАНО: команда /help
     application.add_handler(CommandHandler("cancel", cancel))
     application.add_handler(CommandHandler("faq", faq_command))
-    application.add_handler(CommandHandler("testsite", test_site_command))
-    application.add_handler(CommandHandler("testai", test_ai_command))
-    application.add_handler(CommandHandler("testimage", test_image_command))
-    application.add_handler(admin_setup_conv) 
+    application.add_handler(CommandHandler("testsite", test_site_command, filters=filters.User(ADMIN_IDS)))
+    application.add_handler(CommandHandler("testai", test_ai_command, filters=filters.User(ADMIN_IDS)))
+    application.add_handler(CommandHandler("testimage", test_image_command, filters=filters.User(ADMIN_IDS)))
+    application.add_handler(admin_contact_conv) 
+    application.add_handler(testm_conv) # ВИПРАВЛЕНО: окремий хендлер для /testm
     application.add_handler(MessageHandler(filters.REPLY & filters.User(ADMIN_IDS), handle_admin_direct_reply))
     application.add_handler(CallbackQueryHandler(admin_stats_handler, pattern='^admin_stats$'))
     application.add_handler(CallbackQueryHandler(website_update_handler, pattern='^(broadcast_website|cancel_website_update):.*$'))
@@ -2061,69 +1791,16 @@ async def main() -> None:
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
     application.add_handler(user_conv)
 
-    # --- Запуск JobQueue та веб-сервера ---
+    # --- Запуск JobQueue та Long Polling ---
     await application.initialize()
     
-    # Налаштування та запуск веб-сервера aiohttp
-    web_app = web.Application()
-    web_app['ptb_app'] = application
-    routes = [
-        web.get('/', lambda r: web.FileResponse('./index.html')),
-        web.get('/ws', handle_websocket),
-        web.post(f'/{TELEGRAM_BOT_TOKEN}', handle_telegram_webhook),
-        web.post('/api/init', handle_api_init),
-        web.post('/api/login', handle_api_login),
-        web.post('/api/sendMessage', handle_send_message_web),
-        web.post('/api/stats', lambda r: admin_action_wrapper(r, get_stats_web)),
-        web.post('/api/kb/view', lambda r: admin_action_wrapper(r, get_kb_view_web)),
-        web.post('/api/admin/kb/add', lambda r: admin_action_wrapper(r, add_kb_entry_web)),
-        web.post('/api/admin/kb/edit', lambda r: admin_action_wrapper(r, edit_kb_entry_web)),
-        web.post('/api/admin/kb/delete', lambda r: admin_action_wrapper(r, delete_kb_entry_web)),
-        web.post('/api/broadcast', lambda r: admin_action_wrapper(r, broadcast_web)),
-        web.post('/api/admin/conversations', lambda r: admin_action_wrapper(r, get_conversations_web)),
-        web.post('/api/admin/suggest_reply', lambda r: admin_action_wrapper(r, suggest_reply_web)),
-        web.post('/api/admin/improve_text', lambda r: admin_action_wrapper(r, improve_text_web)),
-        web.post('/api/admin/create_news_post', lambda r: admin_action_wrapper(r, create_news_post_web)),
-        web.post('/api/admin/generate_site_post', lambda r: admin_action_wrapper(r, generate_site_post_web)),
-        web.post('/api/admin/schedule_news', lambda r: admin_action_wrapper(r, schedule_news_web)),
-        web.post('/api/admin/view_scheduled', lambda r: admin_action_wrapper(r, view_scheduled_web)),
-        web.post('/api/admin/cancel_scheduled', lambda r: admin_action_wrapper(r, cancel_scheduled_web)),
-    ]
-    web_app.add_routes(routes)
-    cors = aiohttp_cors.setup(web_app, defaults={"*": aiohttp_cors.ResourceOptions(allow_credentials=True, expose_headers="*", allow_headers="*")})
-    for route in list(web_app.router.routes()): cors.add(route)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, '0.0.0.0', port)
-
     # Запускаємо фонові задачі (JobQueue)
-    await application.start()
+    kyiv_timezone = pytz.timezone("Europe/Kyiv")
+    application.job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
     
-    # Встановлюємо вебхук та запускаємо веб-сервер
-    try:
-        await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
-        logger.info(f"Вебхук успішно встановлено на {WEBHOOK_URL}")
-        await site.start()
-        logger.info(f"Веб-сервер запущено на http://0.0.0.0:{port}")
-        
-        # Додаємо заплановані задачі
-        kyiv_timezone = pytz.timezone("Europe/Kyiv")
-        application.job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
-        application.job_queue.run_once(notify_new_admins, 5)
-        
-        # Головний цикл для підтримки роботи
-        while True:
-            await asyncio.sleep(3600)
-    finally:
-        # Коректне завершення роботи
-        await application.stop()
-        await runner.cleanup()
-        logger.info("Веб-сервер та фонові задачі зупинено.")
-        await application.bot.delete_webhook()
-        logger.info("Вебхук видалено.")
-        await application.shutdown()
-        logger.info("Додаток повністю зупинено.")
+    logger.info("Бот запущено через Long Polling.")
+    await application.run_polling(allowed_updates=Update.ALL_TYPES)
+
 
 if __name__ == '__main__':
     try:
