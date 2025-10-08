@@ -314,6 +314,7 @@ async def try_ai_autoreply(user_question: str) -> str | None:
     """
     logger.info("Запускаю спробу авто відповіді ШІ...")
     
+    # Використовуємо ContextTypes.DEFAULT_TYPE для виклику gather_all_context
     additional_context = await gather_all_context(user_question)
 
     prompt = (
@@ -1834,4 +1835,4 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Бот зупинено вручну.)
+        logger.info("Бот зупинено вручну.")
