@@ -1707,15 +1707,25 @@ async def main() -> None:
     kyiv_timezone = pytz.timezone("Europe/Kyiv")
     application.job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
     
-    # Запускаємо бота в режимі Polling
+    # Запускаємо Polling у неблокуючому режимі
+    polling_task = application.updater.start_polling()
     logger.info("Бот запущено в режимі Polling.")
-    # Прибрано drop_pending_updates=True, щоб уникнути потенційних конфліктів у деяких середовищах
-    await application.run_polling()
+    
+    # Використовуємо Future для очікування, щоб не блокувати цикл подій, але й не завершуватись
+    try:
+        # Чекаємо на невизначений Future, який ніколи не буде встановлено, щоб не завершуватись
+        await asyncio.Future()
+    except asyncio.CancelledError:
+        # Це очікуване скасування при зупинці програми
+        pass
+    finally:
+        # Коректне завершення роботи
+        logger.info("Завершую роботу бота...")
+        await application.updater.stop()
+        await application.stop()
 
 if __name__ == '__main__':
     try:
-        # Використання asyncio.run() є стандартним патерном для запуску асинхронної функції
-        # Якщо помилка Runtime Error повториться, це може бути обмеженням середовища
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот зупинено вручну.")
