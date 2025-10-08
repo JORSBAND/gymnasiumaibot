@@ -19,6 +19,7 @@ import re
 import hashlib
 
 # --- Налаштування ---
+# !!! ВАЖЛИВО: Замініть "YOUR_NEW_TELEGRAM_BOT_TOKEN_HERE" на ваш дійсний токен Telegram !!!
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8223675237:AAF_kmo6SP4XZS23NeXWFxgkQNUaEZOWNx0")
 GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEcX6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyBtIxTceQYA6UAUyr9R0RrQWQzFNEnWXYA")
 GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.strip()]
@@ -1708,10 +1709,13 @@ async def main() -> None:
     
     # Запускаємо бота в режимі Polling
     logger.info("Бот запущено в режимі Polling.")
-    await application.run_polling(drop_pending_updates=True)
+    # Прибрано drop_pending_updates=True, щоб уникнути потенційних конфліктів у деяких середовищах
+    await application.run_polling()
 
 if __name__ == '__main__':
     try:
+        # Використання asyncio.run() є стандартним патерном для запуску асинхронної функції
+        # Якщо помилка Runtime Error повториться, це може бути обмеженням середовища
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         logger.info("Бот зупинено вручну.")
