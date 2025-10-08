@@ -23,14 +23,15 @@ from aiohttp import web
 # --- Налаштування ---
 # !!! ВАЖЛИВО: Замініть "YOUR_NEW_TELEGRAM_BOT_TOKEN_HERE" на ваш дійсний токен Telegram !!!
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8223675237:AAF_kmo6SP4XZS23NeXWFxgkQNUaEZOWNx0")
-GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyA6op6ah5PD5U_mICb_QXY_IH-3RGVEwEs,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyBtIxTceQYA6UAUyr9R0RrQWQzFNEnWXYA")
+# !!! ВАЖЛИВО: Переконайтеся, що всі ключі Gemini дійсні та мають активний баланс! !!!
+GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEcX6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyBtIxTceQYA6UAUyr9R0RrQWQzFNEnWXYA") # Замінено третій ключ на заглушку
 GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.strip()]
 CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c9612fc52ccb303667c92687")
 CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "v6HjMgCHEqTiElwnW_hK73j1uqQKud1fG-rPInWD")
-STABILITY_AI_API_KEY = os.environ.get("STABILITY_AI_API_KEY", "sk-gilyx5byRgWCUHaAiElv7tCvY5FpCyDkwGwLg7NTnWvFSvk2")
+STABILITY_AI_API_KEY = os.environ.get("STABILITY_AI_API_KEY", "sk-uDtr8UAPxC7JHLG9QAyXt9s4QY142fkbOQA7uZZEgjf99iWp")
 
 # ВАЖЛИВО: Встановіть URL вашого сервісу Render
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://gymnasiumaibot.onrender.com/")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://your-render-app-name.onrender.com")
 WEBHOOK_PATH = f"/{TELEGRAM_BOT_TOKEN}"
 WEBHOOK_URL = RENDER_EXTERNAL_URL.rstrip('/') + WEBHOOK_PATH
 
@@ -129,6 +130,11 @@ async def generate_text_with_fallback(prompt: str) -> str | None:
     except Exception as e:
         logger.error(f"Резервний варіант Cloudflare AI також не спрацював: {e}")
         return None
+    
+    # Додана перевірка, якщо всі моделі не відповіли
+    logger.error("Усі спроби генерації тексту ШІ не вдалися.")
+    return None
+
 
 # --- Стани для ConversationHandler ---
 (SELECTING_CATEGORY, IN_CONVERSATION, WAITING_FOR_REPLY,
@@ -846,22 +852,19 @@ async def generate_post_from_site(update: Update, context: ContextTypes.DEFAULT_
             return
 
         await query.edit_message_text("🎨 *Генерую зображення для поста...*", parse_mode='Markdown')
-        image_prompt_for_ai = (
-            "На основі цього тексту, створи короткий опис (3-7 слів) англійською мовою для генерації зображення. Опис має бути символічним та мінімалістичним.\n\n"
-            f"Текст: {post_text[:300]}"
-        )
+        image_prompt_for_ai = f"Створи короткий опис (3-7 слів) англійською мовою для генерації зображення на основі цього тексту: {processed_text[:300]}"
         image_prompt = await generate_text_with_fallback(image_prompt_for_ai)
         image_bytes = await generate_image(image_prompt.strip() if image_prompt else "school news")
 
         post_id = uuid.uuid4().hex[:8]
-        context.bot_data[f"manual_post_{post_id}"] = {'text': post_text, 'photo': image_bytes}
+        context.bot_data[f"manual_post_{post_id}"] = {'text': processed_text, 'photo': image_bytes}
 
         keyboard = [
             [InlineKeyboardButton("Так, розіслати ✅", callback_data=f"confirm_post:{post_id}")],
             [InlineKeyboardButton("Ні, скасувати ❌", callback_data=f"cancel_post:{post_id}")]
         ]
         await query.delete_message()
-        caption = f"{post_text}\n\n---\n*Робити розсилку цієї новини?*"
+        caption = f"{processed_text}\n\n---\n*Робити розсилку цієї новини?*"
 
         if image_bytes:
             await context.bot.send_photo(
