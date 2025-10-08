@@ -307,6 +307,40 @@ async def gather_all_context(query: str) -> str:
 
     return "\n\n".join(context_parts)
 
+async def try_ai_autoreply(user_question: str) -> str | None:
+    """
+    Намагається згенерувати відповідь ШІ. Якщо ШІ впевнений, що відповідь точна (на основі контексту),
+    він повертає текст відповіді. Інакше повертає None.
+    """
+    logger.info("Запускаю спробу авто відповіді ШІ...")
+    
+    additional_context = await gather_all_context(user_question)
+
+    prompt = (
+        "Ти — корисний та точний асистент для шкільного чату. "
+        "Твоє головне завдання — **автоматично відповідати** лише на ті запитання користувачів, на які ти можеш дати **точну, конкретну та повну відповідь** на основі наданого КОНТЕКСТУ. "
+        "Якщо ти не впевнений, що можеш дати повну відповідь, або якщо запитання є загальною пропозицією чи скаргою, ТИ НЕ ПОВИНЕН ВІДПОВІДАТИ.\n\n"
+        "--- КОНТЕКСТ (з сайту та бази знань) ---\n"
+        f"{additional_context}\n\n"
+        "--- ЗАПИТАННЯ КОРИСТУВАЧА ---\n"
+        f"'{user_question}'\n\n"
+        "--- ІНСТРУКЦІЯ ---"
+        "Якщо ти знайшов точну та конкретну відповідь в КОНТЕКСТІ, розпочни свою відповідь з 'AI_REPLY:' та напиши відповідь ввічливою українською мовою. "
+        "Якщо ти не впевнений у точності, інформації недостатньо, або запитання вимагає людської уваги (скарга, пропозиція, особисте питання), "
+        "відповідай лише одним словом: 'NO_RESPONSE'"
+        "--- ТВОЯ ВІДПОВІДЬ (починається з AI_REPLY: або NO_RESPONSE) ---"
+    )
+
+    ai_raw_response = await generate_text_with_fallback(prompt)
+    
+    if ai_raw_response and ai_raw_response.strip().startswith('AI_REPLY:'):
+        reply_text = ai_raw_response.strip().replace('AI_REPLY:', '', 1).strip()
+        if reply_text:
+            return reply_text
+    
+    return None
+
+
 async def check_website_for_updates(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Виконую щоденну перевірку оновлень на сайті...")
     new_text = get_all_text_from_website()
@@ -909,41 +943,55 @@ async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     message = update.message
     user_data = context.user_data
-    
-    # Збереження повідомлення в історію
     user_id = update.effective_user.id
+    user_info = {'id': user_id, 'name': update.effective_user.full_name}
     text = message.text or message.caption or ""
+    
+    # 1. Збереження повідомлення в історію
     conversations = load_data(CONVERSATIONS_FILE, {})
     user_id_str = str(user_id)
     if user_id_str not in conversations: conversations[user_id_str] = []
     conversations[user_id_str].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
     save_data(conversations, CONVERSATIONS_FILE)
 
+    # 2. Спроба авто-відповіді ШІ
+    ai_response = await try_ai_autoreply(text)
 
-    user_data['user_info'] = {'id': update.effective_user.id, 'name': update.effective_user.full_name}
+    if ai_response:
+        # АВТО-ВІДПОВІДЬ ЗНАЙДЕНА
+        await send_telegram_reply(context.application, user_id, f"🤖 **Автоматична відповідь від ШІ:**\n\n{ai_response}")
+        
+        # Сповіщення адмінів про автоматичну відповідь
+        notification_text = (
+            f"✅ **АВТО-ВІДПОВІДЬ (ШІ)**\n\n"
+            f"**Від:** {user_info['name']} (ID: {user_info['id']})\n"
+            f"**Запит:**\n---\n{text}\n\n"
+            f"**Відповідь ШІ:**\n---\n{ai_response}"
+        )
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=notification_text, parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Не змогли переслати сповіщення про авто-відповідь адміну {admin_id}: {e}")
 
-    if message.text:
-        user_data['user_message'] = message.text
-        user_data['media_type'] = None
-        user_data['file_id'] = None
-    elif message.photo:
-        user_data['user_message'] = message.caption or ""
-        user_data['media_type'] = 'photo'
-        user_data['file_id'] = message.photo[-1].file_id
-    elif message.video:
-        user_data['user_message'] = message.caption or ""
-        user_data['media_type'] = 'video'
-        user_data['file_id'] = message.video.file_id
-    else:
+        # Закінчуємо розмову (не переходимо у стан очікування)
         return ConversationHandler.END
+    else:
+        # АВТО-ВІДПОВІДЬ НЕ ЗНАЙДЕНА -> Переадресація адмінам
+        
+        user_data['user_info'] = user_info
+        user_data['user_message'] = text
+        user_data['media_type'] = message.photo[-1].file_id if message.photo else (message.video.file_id if message.video else None)
+        user_data['file_id'] = message.photo[-1].file_id if message.photo else (message.video.file_id if message.video else None)
 
-    keyboard = [
-        [InlineKeyboardButton("Запитання ❓", callback_data="category_question")],
-        [InlineKeyboardButton("Пропозиція 💡", callback_data="category_suggestion")],
-        [InlineKeyboardButton("Скарга 📄", callback_data="category_complaint")]
-    ]
-    await update.message.reply_text("Будь ласка, оберіть категорію вашого звернення:", reply_markup=InlineKeyboardMarkup(keyboard))
-    return SELECTING_CATEGORY
+        keyboard = [
+            [InlineKeyboardButton("Запитання ❓", callback_data="category_question")],
+            [InlineKeyboardButton("Пропозиція 💡", callback_data="category_suggestion")],
+            [InlineKeyboardButton("Скарга 📄", callback_data="category_complaint")]
+        ]
+        await update.message.reply_text("Будь ласка, оберіть категорію вашого звернення:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return SELECTING_CATEGORY
+
 async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
@@ -964,7 +1012,7 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    forward_text = (f"📩 **Нове звернення**\n\n"
+    forward_text = (f"📩 **Нове звернення (Потребує ручної обробки)**\n\n" # Додано позначку
                     f"**Категорія:** {category}\n"
                     f"**Від:** {user_info['name']} (ID: {user_info['id']})\n\n"
                     f"**Текст:**\n---\n{user_message}")
@@ -1786,4 +1834,4 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        logger.info("Бот зупинено вручну.")
+        logger.info("Бот зупинено вручну.)
