@@ -1123,41 +1123,76 @@ async def anonymous_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     anon_id = str(uuid.uuid4())[:8]
     user_id = update.effective_user.id
-    if 'anonymous_map' not in context.bot_data:
-        context.bot_data['anonymous_map'] = {}
-    context.bot_data['anonymous_map'][anon_id] = user_id
     message_text = update.message.text
     
-    # Збереження анонімного повідомлення в історію
+    # 1. Збереження повідомлення в історію
     user_id_str = str(user_id)
     conversations = load_data(CONVERSATIONS_FILE, {})
     if user_id_str not in conversations: conversations[user_id_str] = []
     conversations[user_id_str].append({"sender": "user", "text": f"(Анонімно) {message_text}", "timestamp": datetime.now().isoformat()})
     save_data(conversations, CONVERSATIONS_FILE)
 
-
-    keyboard = [
-        [InlineKeyboardButton("Відповісти з ШІ 🤖", callback_data=f"anon_ai_reply:{anon_id}")],
-        [InlineKeyboardButton("Відповісти особисто ✍️", callback_data=f"anon_reply:{anon_id}")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    # Додаємо примітку, якщо це тестове звернення від адміна
-    admin_note = " [ТЕСТ]" if user_id in ADMIN_IDS else ""
-    forward_text = f"🤫 **Нове анонімне звернення{admin_note} (ID: {anon_id})**\n\n**Текст:**\n---\n{message_text}"
+    # 2. Спроба авто-відповіді ШІ
+    ai_response = await try_ai_autoreply(message_text)
     
-    for admin_id in ADMIN_IDS:
-        try:
-            await context.bot.send_message(chat_id=admin_id, text=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
-        except Exception as e:
-            logger.error(f"Не вдалося переслати анонімне адміну {admin_id}: {e}")
-            
-    if user_id in ADMIN_IDS:
-        await update.message.reply_text("✅ Ваше тестове анонімне повідомлення надіслано адміністраторам.")
-    else:
-        await update.message.reply_text("✅ Ваше анонімне повідомлення надіслано.")
+    if ai_response:
+        # АВТО-ВІДПОВІДЬ ЗНАЙДЕНА
         
-    return ConversationHandler.END
+        # Надсилаємо відповідь користувачу
+        await send_telegram_reply(context.application, user_id, f"🤫 **Відповідь на ваше анонімне звернення (від ШІ):**\n\n{ai_response}")
+        
+        # Сповіщення адмінів про автоматичну відповідь
+        admin_note = " [ТЕСТ]" if user_id in ADMIN_IDS else ""
+        notification_text = (
+            f"✅ **АВТО-ВІДПОВІДЬ АНОНІМУ (ШІ){admin_note}**\n\n"
+            f"**ID:** {user_id}\n"
+            f"**Запит:**\n---\n{message_text}\n\n"
+            f"**Відповідь ШІ:**\n---\n{ai_response}"
+        )
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=notification_text, parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Не змогли переслати сповіщення про авто-відповідь адміну {admin_id}: {e}")
+
+        # Закінчуємо розмову
+        if user_id in ADMIN_IDS:
+            await update.message.reply_text("✅ Ваше тестове анонімне повідомлення було оброблено ШІ.")
+        else:
+            await update.message.reply_text("✅ Ваше анонімне повідомлення надіслано (оброблено ШІ).")
+        return ConversationHandler.END
+        
+    else:
+        # АВТО-ВІДПОВІДЬ НЕ ЗНАЙДЕНА -> Переадресація адмінам
+        
+        # Зберігаємо ID аноніма для ручної відповіді
+        if 'anonymous_map' not in context.bot_data:
+            context.bot_data['anonymous_map'] = {}
+        context.bot_data['anonymous_map'][anon_id] = user_id
+
+        keyboard = [
+            [InlineKeyboardButton("Відповісти з ШІ 🤖", callback_data=f"anon_ai_reply:{anon_id}")],
+            [InlineKeyboardButton("Відповісти особисто ✍️", callback_data=f"anon_reply:{anon_id}")],
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Додаємо примітку, якщо це тестове звернення від адміна
+        admin_note = " [ТЕСТ]" if user_id in ADMIN_IDS else ""
+        forward_text = f"🤫 **Нове анонімне звернення (Ручна обробка){admin_note} (ID: {anon_id})**\n\n**Текст:**\n---\n{message_text}"
+        
+        for admin_id in ADMIN_IDS:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Не вдалося переслати анонімне адміну {admin_id}: {e}")
+                
+        if user_id in ADMIN_IDS:
+            await update.message.reply_text("✅ Ваше тестове анонімне повідомлення надіслано адміністраторам.")
+        else:
+            await update.message.reply_text("✅ Ваше анонімне повідомлення надіслано.")
+            
+        return ConversationHandler.END
+
 async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
