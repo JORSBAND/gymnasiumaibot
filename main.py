@@ -25,9 +25,14 @@ from aiohttp import web
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8223675237:AAF_kmo6SP4XZS23NeXWFxgkQNUaEZOWNx0")
 GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEcX6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyBtIxTceQYA6UAUyr9R0RrQWQzFNEnWXYA")
 GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.strip()]
-CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c6912fc52ccb303667c92687")
+CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c9612fc52ccb303667c92687")
 CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "v6HjMgCHEqTiElwnW_hK73j1uqQKud1fG-rPInWD")
 STABILITY_AI_API_KEY = os.environ.get("STABILITY_AI_API_KEY", "sk-uDtr8UAPxC7JHLG9QAyXt9s4QY142fkbOQA7uZZEgjf99iWp")
+
+# ВАЖЛИВО: Встановіть URL вашого сервісу Render
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://gymnasiumaibot.onrender.com/")
+WEBHOOK_PATH = f"/{TELEGRAM_BOT_TOKEN}"
+WEBHOOK_URL = RENDER_EXTERNAL_URL.rstrip('/') + WEBHOOK_PATH
 
 ADMIN_IDS = [
     838464083,
@@ -1570,13 +1575,32 @@ async def receive_test_message(update: Update, context: ContextTypes.DEFAULT_TYP
 # --- Фіктивний Web-сервер для задоволення Render ---
 async def dummy_handler(request):
     """Обробник, який просто повертає 200 OK і повідомляє, що порт відкрито."""
-    return web.Response(text="Bot is running (Polling mode).", status=200)
+    return web.Response(text="Bot is running (WebHook mode).", status=200)
 
-async def start_web_server():
+# --- Обробник вхідних вебхуків Telegram ---
+async def handle_telegram_webhook(request: web.Request) -> web.Response:
+    """Обробляє вхідні оновлення від Telegram."""
+    application = request.app['ptb_app']
+    try:
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return web.Response()
+    except json.JSONDecodeError:
+        logger.warning("Не вдалося розпарсити JSON з вебхука Telegram.")
+        return web.Response(status=400)
+    except Exception as e:
+        logger.error(f"Помилка в обробнику вебхука: {e}")
+        return web.Response(status=500)
+
+async def start_web_server(application):
     """Створює і запускає мінімальний веб-сервер aiohttp."""
     web_app = web.Application()
-    web_app.router.add_get('/', dummy_handler)
-    web_app.router.add_post('/{token}', dummy_handler) # Для вебхуків, якщо їх увімкнути
+    web_app['ptb_app'] = application
+    
+    # Маршрути для вебхука Telegram та перевірки здоров'я
+    web_app.router.add_post(WEBHOOK_PATH, handle_telegram_webhook)
+    web_app.router.add_get('/', dummy_handler) # Для перевірки здоров'я Render
     
     runner = web.AppRunner(web_app)
     await runner.setup()
@@ -1584,7 +1608,7 @@ async def start_web_server():
     
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    logger.info(f"Фіктивний веб-сервер запущено на http://0.0.0.0:{port}")
+    logger.info(f"WebHook-сервер AIOHTTP запущено на http://0.0.0.0:{port}")
     
     return runner
 
@@ -1724,19 +1748,23 @@ async def main() -> None:
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
     application.add_handler(user_conv)
 
-    # --- Запуск JobQueue та Application (Polling) ---
+    # --- Запуск JobQueue та Application (WebHook) ---
     await application.initialize()
     
     # Запускаємо заплановані задачі
     kyiv_timezone = pytz.timezone("Europe/Kyiv")
     application.job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
     
-    # Запуск Polling у неблокуючому режимі
-    polling_task = application.updater.start_polling()
-    logger.info("Бот Polling запущено у неблокуючому режимі.")
-    
-    # Запуск фіктивного веб-сервера
-    web_runner = await start_web_server()
+    # Встановлюємо вебхук
+    await application.bot.set_webhook(url=WEBHOOK_URL, allowed_updates=Update.ALL_TYPES)
+    logger.info(f"Вебхук успішно встановлено на {WEBHOOK_URL}")
+
+    # Запуск WebHook-сервера
+    web_runner = await start_web_server(application)
+
+    # Запуск WebHook-режиму
+    await application.start()
+    logger.info("Бот запущено в режимі WebHook.")
 
     # Основний цикл підтримки життя
     try:
@@ -1748,9 +1776,11 @@ async def main() -> None:
     finally:
         # Коректне завершення роботи
         logger.info("Завершую роботу бота...")
+        await application.bot.delete_webhook()
+        logger.info("Вебхук видалено.")
         await web_runner.cleanup()
-        await application.updater.stop()
         await application.stop()
+        logger.info("Додаток повністю зупинено.")
 
 if __name__ == '__main__':
     try:
