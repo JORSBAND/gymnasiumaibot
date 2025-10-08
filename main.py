@@ -962,8 +962,13 @@ async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conversations[user_id_str].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
     save_data(conversations, CONVERSATIONS_FILE)
 
-    # 2. Спроба авто-відповіді ШІ
-    ai_response = await try_ai_autoreply(text)
+    # 2. Визначаємо, чи є медіа-вміст. Якщо так, пропускаємо ШІ і йдемо прямо до адмінів.
+    has_media = message.photo or message.video
+    ai_response = None
+    
+    if not has_media:
+        # Спроба авто-відповіді ШІ тільки для чистого тексту
+        ai_response = await try_ai_autoreply(text)
 
     if ai_response:
         # АВТО-ВІДПОВІДЬ ЗНАЙДЕНА
@@ -989,8 +994,9 @@ async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         user_data['user_info'] = user_info
         user_data['user_message'] = text
-        user_data['media_type'] = message.photo[-1].file_id if message.photo else (message.video.file_id if message.video else None)
+        # Коректно зберігаємо file_id медіа, якщо воно є
         user_data['file_id'] = message.photo[-1].file_id if message.photo else (message.video.file_id if message.video else None)
+        user_data['media_type'] = 'photo' if message.photo else ('video' if message.video else None)
 
         keyboard = [
             [InlineKeyboardButton("Запитання ❓", callback_data="category_question")],
@@ -1036,8 +1042,10 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception as e:
             logger.error(f"Не змогли переслати звернення адміну {admin_id}: {e}")
 
+    # ВИПРАВЛЕНО: Редагування повідомлення про вибір категорії
     await query.edit_message_text("✅ Дякуємо! Ваше повідомлення надіслано. Якщо у вас є доповнення, просто напишіть їх наступним повідомленням.")
     return IN_CONVERSATION
+
 async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id in ADMIN_IDS: return ConversationHandler.END # Адміни не ведуть розмови тут
 
@@ -1161,14 +1169,20 @@ async def start_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.chat_data['target_user_id'] = target_user_id_str
     original_text = query.message.text or query.message.caption or ""
 
+    # ВИПРАВЛЕНО: Використовуємо message_id для подальшого редагування
+    context.chat_data['original_message_id'] = query.message.message_id 
+
     user_question_part = original_text.split('---\n')
     context.chat_data['original_user_message'] = user_question_part[-1] if user_question_part else ""
 
     if action == "manual_reply":
-        await query.edit_message_text(text=f"{original_text}\n\n✍️ *Напишіть вашу відповідь. /cancel для скасування*", parse_mode='Markdown')
+        # ВИПРАВЛЕНО: Не редагуємо, а надсилаємо нове повідомлення, щоб уникнути конфлікту "Message is not modified"
+        # Попереднє повідомлення з кнопками залишається як "історія"
+        await query.message.reply_text(f"✍️ *Напишіть вашу відповідь користувачу (ID: {target_user_id_str}). /cancel для скасування*", parse_mode='Markdown')
         return WAITING_FOR_REPLY
 
     elif action == "ai_reply":
+        # ВИПРАВЛЕНО: Редагуємо повідомлення, щоб відобразити статус генерації
         await query.edit_message_text(text=f"{original_text}\n\n🤔 *Генерую відповідь (це може зайняти до 45 секунд)...*", parse_mode='Markdown')
         try:
             user_question = context.chat_data.get('original_user_message', '')
@@ -1196,7 +1210,9 @@ async def start_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 [InlineKeyboardButton("Надіслати відповідь ✅", callback_data=f"send_ai_reply:{context.chat_data['target_user_id']}")],
                 [InlineKeyboardButton("Скасувати ❌", callback_data="cancel_ai_reply")]
             ]
-            preview_text = f"🤖 **Ось відповідь від ШІ:**\n\n{ai_response_text}\n\n---\n*Надіслати цю відповідь користувачу?*"
+            preview_text = f"{original_text}\n\n🤖 **Ось відповідь від ШІ:**\n\n{ai_response_text}\n\n---\n*Надіслати цю відповідь користувачу?*"
+            
+            # ВИПРАВЛЕНО: Використовуємо edit_message_text для оновлення повідомлення
             await query.edit_message_text(text=preview_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
             return CONFIRMING_AI_REPLY
 
@@ -1225,12 +1241,19 @@ async def send_ai_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TY
         # Target ID will always be int from a Telegram user now
         target_user_id_typed = int(target_user_id)
         await send_telegram_reply(context.application, target_user_id_typed, ai_response_text)
-        await query.edit_message_text(text="✅ *Відповідь успішно надіслано.*", parse_mode='Markdown')
+        
+        # ВИПРАВЛЕНО: Редагуємо повідомлення, щоб позначити, що на нього відповіли
+        original_text = query.message.text.split("\n\n🤖 **Ось відповідь від ШІ:**")[0]
+        final_text = f"{original_text}\n\n✅ **ВІДПОВІДЬ НАДІСЛАНА (ШІ).**"
+        
+        await query.edit_message_text(text=final_text, parse_mode='Markdown')
         await query.edit_message_reply_markup(reply_markup=None)
         await notify_other_admins(context, query.from_user.id, original_message)
     except Exception as e:
         logger.error(f"Помилка надсилання відповіді ШІ користувачу {target_user_id}: {e}")
-        await query.edit_message_text(text=f"❌ *Помилка надсилання відповіді: {e}*", parse_mode='Markdown')
+        # ВИПРАВЛЕНО: Редагуємо лише текст, якщо сталася помилка
+        await query.message.reply_text(f"❌ *Помилка надсилання відповіді: {e}*", parse_mode='Markdown')
+        await query.edit_message_reply_markup(reply_markup=None) # Прибираємо кнопки
 
     context.chat_data.clear()
     return ConversationHandler.END
@@ -1248,6 +1271,24 @@ async def receive_manual_reply(update: Update, context: ContextTypes.DEFAULT_TYP
         target_user_id_typed = int(target_user_id)
         await send_telegram_reply(context.application, target_user_id_typed, f"✉️ **Відповідь від адміністратора:**\n\n{owner_reply_text}")
         await update.message.reply_text("✅ Вашу відповідь надіслано.")
+        
+        # ВИПРАВЛЕНО: Редагуємо оригінальне повідомлення (яке містило кнопки), щоб позначити його як оброблене
+        original_message_id = context.chat_data.get('original_message_id')
+        if original_message_id:
+            try:
+                original_msg = await context.bot.get_message(chat_id=update.effective_chat.id, message_id=original_message_id)
+                original_text = original_msg.text.split("\n\n✍️ *Напишіть вашу відповідь")[0].split("\n\n🤖 **Ось відповідь від ШІ:**")[0]
+                final_text = f"{original_text}\n\n✅ **ВІДПОВІДЬ НАДІСЛАНА (РУЧНА).**"
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=original_message_id,
+                    text=final_text,
+                    parse_mode='Markdown',
+                    reply_markup=None
+                )
+            except Exception as e:
+                 logger.warning(f"Не вдалося відредагувати оригінальне повідомлення після ручної відповіді: {e}")
+        
         await notify_other_admins(context, update.effective_user.id, original_message)
     except Exception as e:
         await update.message.reply_text(f"❌ Не вдалося надіслати: {e}")
@@ -1265,6 +1306,7 @@ async def start_anonymous_ai_reply(update: Update, context: ContextTypes.DEFAULT
     original_text = query.message.text or ""
     user_question = original_text.split('---\n')[-1].strip()
     context.chat_data['original_user_message'] = user_question
+    context.chat_data['original_message_id'] = query.message.message_id 
 
     await query.edit_message_text(text=f"{original_text}\n\n🤔 *Генерую відповідь для аноніма (це може зайняти до 45 секунд)...*", parse_mode='Markdown')
     try:
@@ -1290,7 +1332,9 @@ async def start_anonymous_ai_reply(update: Update, context: ContextTypes.DEFAULT
             [InlineKeyboardButton("Надіслати відповідь ✅", callback_data=f"send_anon_ai_reply:{anon_id}")],
             [InlineKeyboardButton("Скасувати ❌", callback_data="cancel_ai_reply")]
         ]
-        preview_text = f"🤖 **Ось відповідь від ШІ для аноніма (ID: {anon_id}):**\n\n{ai_response_text}\n\n---\n*Надіслати цю відповідь?*"
+        preview_text = f"{original_text}\n\n🤖 **Ось відповідь від ШІ для аноніма (ID: {anon_id}):**\n\n{ai_response_text}\n\n---\n*Надіслати цю відповідь?*"
+        
+        # ВИПРАВЛЕНО: Редагуємо повідомлення, щоб відобразити прев'ю
         await query.edit_message_text(text=preview_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
         return CONFIRMING_AI_REPLY
 
@@ -1315,12 +1359,18 @@ async def send_anonymous_ai_reply_to_user(update: Update, context: ContextTypes.
 
     try:
         await send_telegram_reply(context.application, user_id, f"🤫 **Відповідь на ваше анонімне звернення (від ШІ):**\n\n{ai_response_text}")
-        await query.edit_message_text(text="✅ *Відповідь аноніму успішно надіслано.*", parse_mode='Markdown')
+        
+        # ВИПРАВЛЕНО: Редагуємо повідомлення, щоб позначити, що на нього відповіли
+        original_text = query.message.text.split("\n\n🤖 **Ось відповідь від ШІ для аноніма")[0]
+        final_text = f"{original_text}\n\n✅ **ВІДПОВІДЬ АНОНІМУ НАДІСЛАНА (ШІ).**"
+        
+        await query.edit_message_text(text=final_text, parse_mode='Markdown')
         await query.edit_message_reply_markup(reply_markup=None)
+
         await notify_other_admins(context, query.from_user.id, original_message)
     except Exception as e:
         logger.error(f"Помилка надсилання ШІ-відповіді аноніму {user_id}: {e}")
-        await query.edit_message_text(text=f"❌ *Помилка надсилання відповіді: {e}*", parse_mode='Markdown')
+        await query.message.reply_text(f"❌ *Помилка надсилання відповіді: {e}*", parse_mode='Markdown')
 
     context.chat_data.clear()
     return ConversationHandler.END
@@ -1335,8 +1385,11 @@ async def start_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TY
     original_text = query.message.text or ""
     user_question = original_text.split('---\n')[-1].strip()
     context.chat_data['original_user_message'] = user_question
-    
+    context.chat_data['original_message_id'] = query.message.message_id 
+
+    # ВИПРАВЛЕНО: Надсилаємо нове повідомлення, щоб не конфліктувати з inline-кнопками
     await query.message.reply_text(f"✍️ Напишіть вашу відповідь для аноніма (ID: {anon_id}). /cancel для скасування.")
+    
     return WAITING_FOR_ANONYMOUS_REPLY
 async def send_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     anon_id = context.chat_data.get('anon_id_to_reply')
@@ -1351,6 +1404,24 @@ async def send_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         await send_telegram_reply(context.application, user_id, f"🤫 **Відповідь на ваше анонімне звернення:**\n\n{admin_reply_text}")
         await update.message.reply_text(f"✅ Вашу відповідь аноніму (ID: {anon_id}) надіслано.")
+        
+        # ВИПРАВЛЕНО: Редагуємо оригінальне повідомлення (яке містило кнопки)
+        original_message_id = context.chat_data.get('original_message_id')
+        if original_message_id:
+            try:
+                original_msg = await context.bot.get_message(chat_id=update.effective_chat.id, message_id=original_message_id)
+                original_text = original_msg.text.split("---\n")[0]
+                final_text = f"{original_text}\n\n✅ **ВІДПОВІДЬ АНОНІМУ НАДІСЛАНА (РУЧНА).**"
+                await context.bot.edit_message_text(
+                    chat_id=update.effective_chat.id,
+                    message_id=original_message_id,
+                    text=final_text,
+                    parse_mode='Markdown',
+                    reply_markup=None
+                )
+            except Exception as e:
+                logger.warning(f"Не вдалося відредагувати оригінальне анонімне повідомлення після ручної відповіді: {e}")
+
         await notify_other_admins(context, update.effective_user.id, original_message)
     except Exception as e:
         await update.message.reply_text(f"❌ Не вдалося надіслати: {e}")
@@ -1495,6 +1566,18 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             'Операцію скасовано.',
             reply_markup=ReplyKeyboardRemove()
         )
+        # ВИПРАВЛЕНО: При скасуванні, якщо є ID повідомлення, його треба прибрати
+        if 'original_message_id' in context.chat_data and update.effective_chat.id in ADMIN_IDS:
+             try:
+                # Намагаємося видалити кнопки
+                await context.bot.edit_message_reply_markup(
+                    chat_id=update.effective_chat.id,
+                    message_id=context.chat_data['original_message_id'],
+                    reply_markup=None
+                )
+             except Exception:
+                 pass # Ігноруємо помилку, якщо повідомлення вже змінене або видалене
+                 
         context.user_data.clear()
         context.chat_data.clear()
         return ConversationHandler.END
