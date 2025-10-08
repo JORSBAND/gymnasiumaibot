@@ -23,15 +23,16 @@ from aiohttp import web
 # --- Налаштування ---
 # !!! ВАЖЛИВО: Замініть "YOUR_NEW_TELEGRAM_BOT_TOKEN_HERE" на ваш дійсний токен Telegram !!!
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8223675237:AAF_kmo6SP4XZS23NeXWFxgkQNUaEZOWNx0")
-# !!! ВАЖЛИВО: Переконайтеся, що всі ключі Gemini дійсні та мають активний баланс! !!!
-GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyDH5sprfzkyfltY8wSjSBYvccRcpArvLRo,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyBtIxTceQYA6UAUyr9R0RrQWQzFNEnWXYA") # Замінено третій ключ на заглушку
+# !!! КРИТИЧНО: Переконайтеся, що всі ключі Gemini дійсні та мають активний баланс! !!!
+GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEcX6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyA6op6ah5PD5U_mICb_QXY_IH-3RGVEwEs")
 GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.strip()]
 CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c9612fc52ccb303667c92687")
+# !!! КРИТИЧНО: Токен Cloudflare не працює (401). Перевірте токен Cloudflare! !!!
 CLOUDFLARE_API_TOKEN = os.environ.get("CLOUDFLARE_API_TOKEN", "v6HjMgCHEqTiElwnW_hK73j1uqQKud1fG-rPInWD")
 STABILITY_AI_API_KEY = os.environ.get("STABILITY_AI_API_KEY", "sk-uDtr8UAPxC7JHLG9QAyXt9s4QY142fkbOQA7uZZEgjf99iWp")
 
 # ВАЖЛИВО: Встановіть URL вашого сервісу Render
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://your-render-app-name.onrender.com")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://gymnasiumaibot.onrender.com/")
 WEBHOOK_PATH = f"/{TELEGRAM_BOT_TOKEN}"
 WEBHOOK_URL = RENDER_EXTERNAL_URL.rstrip('/') + WEBHOOK_PATH
 
@@ -93,11 +94,13 @@ async def send_telegram_reply(ptb_app: Application, user_id: int, text: str):
 
 # --- Генерація тексту ---
 async def generate_text_with_fallback(prompt: str) -> str | None:
+    # --- Спроба 1: Gemini API ---
     for api_key in GEMINI_API_KEYS:
         try:
             logger.info(f"Спроба використати Gemini API ключ, що закінчується на ...{api_key[-4:]}")
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            # ВИПРАВЛЕНО: Змінено модель gemini-1.5-flash на gemini-2.5-flash
+            model = genai.GenerativeModel('gemini-2.5-flash') 
             response = await asyncio.to_thread(model.generate_content, prompt, request_options={'timeout': 45})
             if response.text:
                 logger.info("Успішна відповідь від Gemini.")
@@ -106,6 +109,7 @@ async def generate_text_with_fallback(prompt: str) -> str | None:
             logger.warning(f"Gemini ключ ...{api_key[-4:]} не спрацював: {e}")
             continue
 
+    # --- Спроба 2: Cloudflare AI ---
     logger.warning("Усі ключі Gemini не спрацювали. Переходжу до Cloudflare AI.")
     if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN or "your_cf" in CLOUDFLARE_ACCOUNT_ID:
         logger.error("Не налаштовано дані для Cloudflare AI.")
