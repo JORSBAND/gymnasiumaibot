@@ -319,33 +319,31 @@ async def gather_all_context(query: str) -> str:
 
 async def try_ai_autoreply(user_question: str) -> str | None:
     """
-    Намагається згенерувати відповідь ШІ. Якщо ШІ впевнений, що відповідь точна (на основі контексту),
-    він повертає текст відповіді. Інакше повертає None.
+    Намагається згенерувати відповідь ШІ. Використовує "м'яку перевірку"
+    через токени [CONFIDENT] / [UNCERTAIN].
     """
     logger.info("Запускаю спробу авто відповіді ШІ...")
     
-    # Використовуємо ContextTypes.DEFAULT_TYPE для виклику gather_all_context
     additional_context = await gather_all_context(user_question)
 
     prompt = (
         "Ти — корисний та точний асистент для шкільного чату. "
-        "Твоє головне завдання — **автоматично відповідати** лише на ті запитання користувачів, на які ти можеш дати **точну, конкретну та повну відповідь** на основі наданого КОНТЕКСТУ. "
-        "Якщо ти не впевнений, що можеш дати повну відповідь, або якщо запитання є загальною пропозицією чи скаргою, ТИ НЕ ПОВИНЕН ВІДПОВІДАТИ.\n\n"
+        "Твоє завдання — відповісти на запитання користувача на основі наданого КОНТЕКСТУ. "
+        "Якщо ти вважаєш, що можеш дати **конкретну, точну та корисну** відповідь (інформація знайдена в контексті), познач себе як CONFIDENT. "
+        "Якщо інформації недостатньо, запитання вимагає людської уваги (скарга, пропозиція) або відповідь буде неконкретною, познач себе як UNCERTAIN.\n\n"
         "--- КОНТЕКСТ (з сайту та бази знань) ---\n"
         f"{additional_context}\n\n"
         "--- ЗАПИТАННЯ КОРИСТУВАЧА ---\n"
         f"'{user_question}'\n\n"
         "--- ІНСТРУКЦІЯ ---"
-        "Якщо ти знайшов точну та конкретну відповідь в КОНТЕКСТІ, розпочни свою відповідь з 'AI_REPLY:' та напиши відповідь ввічливою українською мовою. "
-        "Якщо ти не впевнений у точності, інформації недостатньо, або запитання вимагає людської уваги (скарга, пропозиція, особисте питання), "
-        "відповідай лише одним словом: 'NO_RESPONSE'"
-        "--- ТВОЯ ВІДПОВІДЬ (починається з AI_REPLY: або NO_RESPONSE) ---"
+        "Розпочни свою відповідь одним із двох токенів: [CONFIDENT] або [UNCERTAIN]. Після токена напиши саму відповідь ввічливою українською мовою. "
+        "--- ТВОЯ ВІДПОВІДЬ (починається з [CONFIDENT] або [UNCERTAIN]) ---"
     )
 
     ai_raw_response = await generate_text_with_fallback(prompt)
     
-    if ai_raw_response and ai_raw_response.strip().startswith('AI_REPLY:'):
-        reply_text = ai_raw_response.strip().replace('AI_REPLY:', '', 1).strip()
+    if ai_raw_response and ai_raw_response.strip().startswith('[CONFIDENT]'):
+        reply_text = ai_raw_response.strip().replace('[CONFIDENT]', '', 1).strip()
         if reply_text:
             return reply_text
     
@@ -1165,7 +1163,7 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not query: return ConversationHandler.END
     if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
-    await query.edit_message_text("Напишіть повідомлення для розсилки. /cancel для скасування.")
+    await query.edit_message_text("Надішліть повідомлення для розсилки. /cancel для скасування.")
     return WAITING_FOR_BROADCAST_MESSAGE
 async def get_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.chat_data['broadcast_message'] = update.message.text
