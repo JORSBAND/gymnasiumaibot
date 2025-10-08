@@ -10,13 +10,15 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes,
     CallbackQueryHandler, ConversationHandler
 )
-# Не забудьте встановити: pip install python-telegram-bot google-generativeai requests beautifulsoup4 pytz
+# Не забудьте встановити: pip install python-telegram-bot google-generativeai requests beautifulsoup4 pytz aiohttp
 import requests
 from bs4 import BeautifulSoup
 import pytz
 from typing import Any, Callable, Dict
 import re
 import hashlib
+# --- Web App мінімальні імпорти для Render (залишено для імітації відкритого порту) ---
+from aiohttp import web
 
 # --- Налаштування ---
 # !!! ВАЖЛИВО: Замініть "YOUR_NEW_TELEGRAM_BOT_TOKEN_HERE" на ваш дійсний токен Telegram !!!
@@ -1565,6 +1567,28 @@ async def receive_test_message(update: Update, context: ContextTypes.DEFAULT_TYP
     context.chat_data.clear()
     return ConversationHandler.END
 
+# --- Фіктивний Web-сервер для задоволення Render ---
+async def dummy_handler(request):
+    """Обробник, який просто повертає 200 OK і повідомляє, що порт відкрито."""
+    return web.Response(text="Bot is running (Polling mode).", status=200)
+
+async def start_web_server():
+    """Створює і запускає мінімальний веб-сервер aiohttp."""
+    web_app = web.Application()
+    web_app.router.add_get('/', dummy_handler)
+    web_app.router.add_post('/{token}', dummy_handler) # Для вебхуків, якщо їх увімкнути
+    
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080)) # Використовуємо 8080 як дефолт
+    
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"Фіктивний веб-сервер запущено на http://0.0.0.0:{port}")
+    
+    return runner
+
+# --- Основна функція ---
 async def main() -> None:
     # --- Створення та налаштування Application ---
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -1707,20 +1731,24 @@ async def main() -> None:
     kyiv_timezone = pytz.timezone("Europe/Kyiv")
     application.job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
     
-    # Запускаємо Polling у неблокуючому режимі
+    # Запуск Polling у неблокуючому режимі
     polling_task = application.updater.start_polling()
-    logger.info("Бот запущено в режимі Polling.")
+    logger.info("Бот Polling запущено у неблокуючому режимі.")
     
-    # Використовуємо Future для очікування, щоб не блокувати цикл подій, але й не завершуватись
+    # Запуск фіктивного веб-сервера
+    web_runner = await start_web_server()
+
+    # Основний цикл підтримки життя
     try:
-        # Чекаємо на невизначений Future, який ніколи не буде встановлено, щоб не завершуватись
-        await asyncio.Future()
+        # Чекаємо на невизначений Future, який утримуватиме цикл подій
+        while True:
+            await asyncio.sleep(3600)
     except asyncio.CancelledError:
-        # Це очікуване скасування при зупинці програми
         pass
     finally:
         # Коректне завершення роботи
         logger.info("Завершую роботу бота...")
+        await web_runner.cleanup()
         await application.updater.stop()
         await application.stop()
 
