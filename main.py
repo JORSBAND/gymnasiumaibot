@@ -944,6 +944,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         '➡️ Використовуйте команду /anonymous, щоб надіслати анонімне звернення.\n'
         '➡️ Використовуйте /faq для перегляду поширених запитань.'
     )
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    
+    if user_id in ADMIN_IDS:
+        help_text = (
+            "🔐 **Адміністративна Допомога**\n\n"
+            "**Основні функції:**\n"
+            "• `/admin` - Головна панель керування.\n"
+            "• `/info` - Детальна інструкція по роботі з ботом.\n"
+            "• `/faq` - Список поширених запитань.\n"
+            "• `/testm` - Створити тестове звернення для перевірки функціоналу.\n"
+            "• `/anonymous` - Створити анонімне звернення (для тестування).\n\n"
+            "**Обробка звернень:**\n"
+            "Повідомлення від користувачів, на які ШІ не зміг відповісти, надходять із кнопками 'Відповісти за допомогою ШІ' та 'Відповісти особисто'. "
+            "Ви також можете просто **відповісти (Reply)** на повідомлення бота з повідомленням від користувача, щоб надіслати йому пряму відповідь."
+        )
+    else:
+        help_text = (
+            "🙋 **Допомога та Інструкція**\n\n"
+            "**Функціонал бота:**\n"
+            "1. **Запитання до адміністрації:** Просто напишіть ваше повідомлення (запитання, пропозицію чи скаргу). Бот спробує відповісти автоматично за допомогою ШІ та бази знань. Якщо ШІ не впевнений, ваше повідомлення буде надіслано адміністратору.\n"
+            "2. **Анонімне звернення:** Використовуйте `/anonymous`, щоб надіслати повідомлення без розкриття вашого імені.\n"
+            "3. **Поширені запитання:** Використовуйте `/faq`, щоб знайти відповіді на найпопулярніші запитання.\n"
+            "4. **Інструкція:** Ця команда (`/help`) показує цю довідку."
+        )
+    await update.message.reply_text(help_text, parse_mode='Markdown')
+
 async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if update.effective_user.id in ADMIN_IDS:
         await update.message.reply_text("Адміністратори не можуть створювати звернення. Використовуйте /admin для доступу до панелі.")
@@ -1087,11 +1114,13 @@ async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("✅ Доповнення надіслано.")
     return IN_CONVERSATION
 async def anonymous_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    # ВИПРАВЛЕНО: Адмінам дозволено створювати анонімні звернення (для тестування)
+    
     if update.effective_user.id in ADMIN_IDS:
-        await update.message.reply_text("Адміністратори не можуть створювати звернення.")
-        return ConversationHandler.END
+        await update.message.reply_text("Напишіть ваше анонімне повідомлення (як адмін). /cancel для скасування.")
+    else:
+        await update.message.reply_text("Напишіть ваше анонімне повідомлення... Для скасування введіть /cancel.")
         
-    await update.message.reply_text("Напишіть ваше анонімне повідомлення... Для скасування введіть /cancel.")
     return WAITING_FOR_ANONYMOUS_MESSAGE
 async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     anon_id = str(uuid.uuid4())[:8]
@@ -1115,13 +1144,21 @@ async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAUL
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    forward_text = f"🤫 **Нове анонімне звернення (ID: {anon_id})**\n\n**Текст:**\n---\n{message_text}"
+    # Додаємо примітку, якщо це тестове звернення від адміна
+    admin_note = " [ТЕСТ]" if user_id in ADMIN_IDS else ""
+    forward_text = f"🤫 **Нове анонімне звернення{admin_note} (ID: {anon_id})**\n\n**Текст:**\n---\n{message_text}"
+    
     for admin_id in ADMIN_IDS:
         try:
             await context.bot.send_message(chat_id=admin_id, text=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
         except Exception as e:
             logger.error(f"Не вдалося переслати анонімне адміну {admin_id}: {e}")
-    await update.message.reply_text("✅ Ваше анонімне повідомлення надіслано.")
+            
+    if user_id in ADMIN_IDS:
+        await update.message.reply_text("✅ Ваше тестове анонімне повідомлення надіслано адміністраторам.")
+    else:
+        await update.message.reply_text("✅ Ваше анонімне повідомлення надіслано.")
+        
     return ConversationHandler.END
 async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -1277,15 +1314,28 @@ async def receive_manual_reply(update: Update, context: ContextTypes.DEFAULT_TYP
         if original_message_id:
             try:
                 original_msg = await context.bot.get_message(chat_id=update.effective_chat.id, message_id=original_message_id)
-                original_text = original_msg.text.split("\n\n✍️ *Напишіть вашу відповідь")[0].split("\n\n🤖 **Ось відповідь від ШІ:**")[0]
+                
+                # Запобігаємо помилці "Message is not modified"
+                # Якщо текст оригінального повідомлення вже не містить маркерів "✍️ *Напишіть вашу відповідь",
+                # це означає, що повідомлення було змінено в іншому місці (наприклад, ШІ).
+                if "✍️ *Напишіть вашу відповідь" in original_msg.text:
+                    original_text = original_msg.text.split("\n\n✍️ *Напишіть вашу відповідь")[0]
+                elif "🤖 **Ось відповідь від ШІ:**" in original_msg.text:
+                     original_text = original_msg.text.split("\n\n🤖 **Ось відповідь від ШІ:**")[0]
+                else:
+                    original_text = original_msg.text
+                
                 final_text = f"{original_text}\n\n✅ **ВІДПОВІДЬ НАДІСЛАНА (РУЧНА).**"
-                await context.bot.edit_message_text(
-                    chat_id=update.effective_chat.id,
-                    message_id=original_message_id,
-                    text=final_text,
-                    parse_mode='Markdown',
-                    reply_markup=None
-                )
+                
+                # Додаємо перевірку, чи вміст дійсно змінився, щоб уникнути помилки.
+                if original_msg.text != final_text:
+                    await context.bot.edit_message_text(
+                        chat_id=update.effective_chat.id,
+                        message_id=original_message_id,
+                        text=final_text,
+                        parse_mode='Markdown',
+                        reply_markup=None
+                    )
             except Exception as e:
                  logger.warning(f"Не вдалося відредагувати оригінальне повідомлення після ручної відповіді: {e}")
         
@@ -1853,6 +1903,7 @@ async def main() -> None:
 
     # --- Реєстрація хендлерів ---
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command)) # Додано help
     application.add_handler(CommandHandler("cancel", cancel))
     application.add_handler(CommandHandler("faq", faq_command))
     
