@@ -3,6 +3,7 @@ import asyncio
 import uuid
 import json
 import logging
+import time # Додано для експоненційного відступу
 from datetime import datetime, time as dt_time
 import google.generativeai as genai
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ReplyKeyboardRemove
@@ -50,12 +51,15 @@ ADMIN_CONTACTS_FILE = 'admin_contacts.json'
 CONVERSATIONS_FILE = 'conversations.json'
 SCHEDULED_POSTS_FILE = 'scheduled_posts.json'
 KNOWLEDGE_BASE_FILE = 'knowledge_base.json' # Локальний кеш бази знань
+USER_IDS_FILE = 'user_ids.json' # Локальний кеш ID користувачів
 
 # --- НАЛАШТУВАННЯ GOOGLE SHEETS (КРИТИЧНО) ---
 # Назва вашої Google Таблиці
 GSHEET_NAME = os.environ.get("GSHEET_NAME", "Бродівська гімназія - База Знань")
-# Назва листа (вкладки) у таблиці
+# Назва листа (вкладки) у таблиці для Бази Знань
 GSHEET_WORKSHEET_NAME = os.environ.get("GSHEET_WORKSHEET_NAME", "База_Знань")
+# Назва листа (вкладки) у таблиці для Користувачів
+USERS_GSHEET_WORKSHEET_NAME = os.environ.get("USERS_GSHEET_WORKSHEET_NAME", "Користувачі")
 # JSON-ключі сервісного облікового запису (як змінна оточення)
 GCP_CREDENTIALS_JSON = os.environ.get("GCP_CREDENTIALS_JSON", "{}") 
 # --- Кінець налаштувань ---
@@ -71,12 +75,13 @@ GSHEET_SCOPE = [
     'https://www.googleapis.com/auth/drive'
 ]
 
-def get_gsheet_client():
-    """Створює та повертає gspread клієнт для взаємодії з Google Sheets."""
+def get_gsheet_client(worksheet_name: str):
+    """Створює та повертає gspread клієнт для взаємодії з конкретним листом."""
     try:
+        # Для коректного парсингу
         creds_dict = json.loads(GCP_CREDENTIALS_JSON)
-        if not creds_dict:
-            logger.error("GCP_CREDENTIALS_JSON порожній. Неможливо підключитися до Google Sheets.")
+        if not creds_dict or "private_key" not in creds_dict:
+            logger.error(f"GCP_CREDENTIALS_JSON порожній або невірний. Неможливо підключитися до Google Sheets (лист: {worksheet_name}).")
             return None
             
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, GSHEET_SCOPE)
@@ -85,23 +90,23 @@ def get_gsheet_client():
         # Відкриття таблиці
         sheet = client.open(GSHEET_NAME)
         # Отримання робочого листа за назвою
-        worksheet = sheet.worksheet(GSHEET_WORKSHEET_NAME)
+        worksheet = sheet.worksheet(worksheet_name)
         return worksheet
     except gspread.exceptions.SpreadsheetNotFound:
         logger.error(f"Таблиця Google з назвою '{GSHEET_NAME}' не знайдена.")
         return None
     except gspread.exceptions.WorksheetNotFound:
-        logger.error(f"Лист Google з назвою '{GSHEET_WORKSHEET_NAME}' не знайдений у таблиці '{GSHEET_NAME}'.")
+        logger.error(f"Лист Google з назвою '{worksheet_name}' не знайдений у таблиці '{GSHEET_NAME}'.")
         return None
     except Exception as e:
-        logger.error(f"Помилка ініціалізації GSheet Client: {e}")
+        logger.error(f"Помилка ініціалізації GSheet Client (лист: {worksheet_name}): {e}")
         return None
 
 def save_data_to_gsheet(kb_data: Dict[str, str]) -> bool:
     """Зберігає поточну базу знань у Google Sheets."""
-    worksheet = get_gsheet_client()
+    worksheet = get_gsheet_client(GSHEET_WORKSHEET_NAME)
     if not worksheet:
-        logger.error("Не вдалося отримати клієнт Google Sheets для збереження.")
+        logger.error("Не вдалося отримати клієнт Google Sheets для збереження KB.")
         return False
     
     try:
@@ -110,40 +115,65 @@ def save_data_to_gsheet(kb_data: Dict[str, str]) -> bool:
         records.extend([[k, v] for k, v in kb_data.items()])
         
         # Очищуємо весь лист і завантажуємо нові дані
-        worksheet.clear()
+        worksheet.batch_clear(["A1:Z1000"]) 
         worksheet.update('A1', records)
-        logger.info(f"✅ Успішно збережено {len(kb_data)} записів у Google Sheets.")
+        logger.info(f"✅ Успішно збережено {len(kb_data)} записів у Google Sheets (KB).")
         return True
     except Exception as e:
-        logger.error(f"Помилка запису в Google Sheets: {e}")
+        logger.error(f"Помилка запису KB в Google Sheets: {e}")
+        return False
+
+def save_users_to_gsheet(users: list[dict]) -> bool:
+    """Зберігає список користувачів та їхні дані у Google Sheets (лист Користувачі)."""
+    worksheet = get_gsheet_client(USERS_GSHEET_WORKSHEET_NAME)
+    if not worksheet:
+        logger.error("Не вдалося отримати клієнт Google Sheets для збереження користувачів.")
+        return False
+
+    try:
+        # Форматуємо дані: [["ID", "Ім'я користувача", "Дата останнього запуску"], ...]
+        records = [["ID", "Ім'я користувача", "Дата останнього запуску"]] 
+        
+        for user in users:
+            records.append([
+                user.get('id', ''),
+                user.get('username', user.get('full_name', 'N/A')),
+                user.get('last_run', '')
+            ])
+        
+        # Очищуємо весь лист і завантажуємо нові дані
+        worksheet.batch_clear(["A1:C1000"])
+        worksheet.update('A1', records)
+        logger.info(f"✅ Успішно збережено {len(users)} записів користувачів у Google Sheets.")
+        return True
+    except Exception as e:
+        logger.error(f"Помилка запису користувачів в Google Sheets: {e}")
         return False
 
 def fetch_kb_from_sheets() -> Dict[str, str] | None:
     """Завантажує базу знань із Google Sheets."""
-    worksheet = get_gsheet_client()
+    worksheet = get_gsheet_client(GSHEET_WORKSHEET_NAME)
     if not worksheet:
         return None 
     
     try:
-        # Отримуємо всі дані як список списків
         list_of_lists = worksheet.get_all_values()
         
         if not list_of_lists or len(list_of_lists) < 2:
-            logger.warning("Google Sheets порожній або містить лише заголовок.")
+            logger.warning("Google Sheets (KB) порожній або містить лише заголовок.")
             return {}
 
-        # Перший рядок - заголовок, ігноруємо його
         data_rows = list_of_lists[1:]
         kb = {}
         for row in data_rows:
             if len(row) >= 2 and row[0].strip():
-                kb[row[0].strip()] = row[1].strip()
+                kb[row[0].strip()] = row[1].strip() if len(row) > 1 else ""
         
-        logger.info(f"✅ Успішно завантажено {len(kb)} записів із Google Sheets.")
+        logger.info(f"✅ Успішно завантажено {len(kb)} записів із Google Sheets (KB).")
         return kb
 
     except Exception as e:
-        logger.error(f"Помилка читання з Google Sheets: {e}")
+        logger.error(f"Помилка читання KB з Google Sheets: {e}")
         return None
 # --- КІНЕЦЬ GOOGLE SHEETS УТИЛІТ ---
 
@@ -173,7 +203,7 @@ def get_default_knowledge_base() -> Dict[str, str]:
             "Мистецтво та Технології: Гілевич Ганна Іванівна, Шнайдрук Галина Степанівна. "
             "Українська мова та література: Булишин Богдана Павлівна, Гаврікова Наталія Володимирівна, Демидчук Оксана Андріївна, Паськів Ірина Василівна, Стрільчук Ірина Петрівна. "
             "Англійська мова: Лисик Галина Іванівна, Пащук Оксана Луківна, Стеблій Оксана Петрівна. "
-            "Математика: Вороняк Галина Ярославівна, Губач Оксана Богданівна, Надорожняк Наталія Мирославівна, Паньків Галина Йосипівна, Янчук Галина Ярославівна. "
+            "Математика: Вороняк Галина Ярославівна, Губач Оксана Богданівна, Надорожняк Наталія Миронівна, Паньків Галина Йосипівна, Янчук Галина Ярославівна. "
             "Історія: Авдєєнко Тетяна Петрівна, Дискант Марія Петрівна, Корчак Андрій Михайлович, Мельник Тарас Юрійович. "
             "Суспільний цикл: Кашуба Ірина Данилівна, Климко Валентина Володимирівна, Козіцька Тетяна Володимирівна, Корольчук Ірина Іванівна, Корчак Оксана Євгенівна. "
             "Біологія та географія: Білостоцька Ірина Богданівна, Демчинська Галина Орестівна, Неверенчук Марія Іванівна, Підгурська Ірина Богданівна."
@@ -194,7 +224,6 @@ def load_data(filename: str, default_type: Any = None) -> Any:
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            # Якщо завантажуємо базу знань, перевіряємо, чи вона порожня
             if filename == KNOWLEDGE_BASE_FILE and not data:
                 raise json.JSONDecodeError("Local KB is empty or corrupted, forcing reload.", f.name, 0)
             return data
@@ -213,10 +242,12 @@ def load_data(filename: str, default_type: Any = None) -> Any:
             # 3. Зберігаємо локально для кешування та подальших модифікацій
             save_data(kb_data, filename)
             return kb_data
+        
+        if filename == USER_IDS_FILE:
+             return []
             
         if default_type is not None:
             return default_type
-        if 'user_ids' in filename: return []
         return {}
 
 def save_data(data: Any, filename: str) -> None:
@@ -224,9 +255,21 @@ def save_data(data: Any, filename: str) -> None:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
             
-        # Якщо ми зберігаємо базу знань, пробуємо синхронізувати її з Google Sheets
+        loop = asyncio.get_running_loop()
+        
+        # Якщо ми зберігаємо базу знань, синхронізуємо її з Google Sheets
         if filename == KNOWLEDGE_BASE_FILE:
-            save_data_to_gsheet(data) # Асинхронність тут не потрібна, gspread працює синхронно
+            # Запускаємо синхронну функцію в окремому потоці
+            asyncio.run_coroutine_threadsafe(
+                asyncio.to_thread(save_data_to_gsheet, data),
+                loop
+            )
+        # Якщо ми зберігаємо список користувачів, синхронізуємо його з Google Sheets
+        if filename == USER_IDS_FILE:
+             asyncio.run_coroutine_threadsafe(
+                asyncio.to_thread(save_users_to_gsheet, data),
+                loop
+            )
             
     except Exception as e:
         logger.error(f"Помилка save_data({filename}): {e}")
@@ -236,7 +279,6 @@ async def send_telegram_reply(ptb_app: Application, user_id: int, text: str):
     conversations = load_data(CONVERSATIONS_FILE, {})
     user_id_str = str(user_id)
     
-    # Web users were removed, so we only handle Telegram users (int IDs)
     if not isinstance(user_id, int): 
          logger.warning(f"Спроба відправити відповідь користувачу з не-int ID: {user_id}. Пропущено.")
          return
@@ -246,120 +288,90 @@ async def send_telegram_reply(ptb_app: Application, user_id: int, text: str):
     save_data(conversations, CONVERSATIONS_FILE)
 
     try:
-        # Додано parse_mode='Markdown' для коректного відображення
         await ptb_app.bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
         logger.info(f"Надіслано відповідь через Telegram користувачу {user_id}")
     except Exception as e:
          logger.error(f"Не вдалося надіслати в Telegram користувачу {user_id}: {e}")
 
-# --- Генерація тексту ---
+def update_user_list(user_id: int, username: str | None, first_name: str | None, last_name: str | None):
+    """Додає або оновлює користувача у списку для статистики."""
+    user_data = load_data(USER_IDS_FILE) # Це список словників
+    
+    full_name = ' '.join(filter(None, [first_name, last_name]))
+    
+    # Шукаємо існуючого користувача за ID
+    found = False
+    for user in user_data:
+        if user.get('id') == user_id:
+            user['username'] = username or user.get('username')
+            user['full_name'] = full_name
+            user['last_run'] = datetime.now(pytz.timezone("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M:%S")
+            found = True
+            break
+            
+    if not found:
+        # Додаємо нового користувача
+        new_user = {
+            'id': user_id,
+            'username': username,
+            'full_name': full_name,
+            'last_run': datetime.now(pytz.timezone("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M:%S")
+        }
+        user_data.append(new_user)
+        logger.info(f"Новий користувач додано: {user_id} ({full_name})")
+
+    save_data(user_data, USER_IDS_FILE) # Зберігаємо локально і синхронізуємо з Sheets
+
+# --- Основна логіка бота (заповнення пропущених функцій) ---
+
+# Використання генерації тексту з експоненційним відступом
 async def generate_text_with_fallback(prompt: str) -> str | None:
     # --- Спроба 1: Gemini API ---
     for api_key in GEMINI_API_KEYS:
-        try:
-            logger.info(f"Спроба використати Gemini API ключ, що закінчується на ...{api_key[-4:]}")
-            genai.configure(api_key=api_key)
-            # ВИПРАВЛЕНО: Змінено модель gemini-1.5-flash на gemini-2.5-flash
-            model = genai.GenerativeModel('gemini-2.5-flash') 
-            response = await asyncio.to_thread(model.generate_content, prompt, request_options={'timeout': 45})
-            if response.text:
-                logger.info("Успішна відповідь від Gemini.")
-                return response.text
-        except Exception as e:
-            logger.warning(f"Gemini ключ ...{api_key[-4:]} не спрацював: {e}")
-            continue
-
+        for attempt in range(3): # 3 спроби на ключ
+            try:
+                logger.info(f"Спроба {attempt+1} з Gemini API ключем ...{api_key[-4:]}")
+                genai.configure(api_key=api_key)
+                model = genai.GenerativeModel('gemini-2.5-flash') 
+                response = await asyncio.to_thread(model.generate_content, prompt, request_options={'timeout': 45})
+                if response.text:
+                    logger.info("Успішна відповідь від Gemini.")
+                    return response.text
+            except Exception as e:
+                logger.warning(f"Gemini ключ ...{api_key[-4:]} не спрацював на спробі {attempt+1}: {e}")
+                await asyncio.sleep(2 ** attempt) # Експоненційний відступ
+                continue
+        
     # --- Спроба 2: Cloudflare AI ---
     logger.warning("Усі ключі Gemini не спрацювали. Переходжу до Cloudflare AI.")
     if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN or "your_cf" in CLOUDFLARE_ACCOUNT_ID:
         logger.error("Не налаштовано дані для Cloudflare AI.")
         return None
 
-    try:
-        cf_url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-2-7b-chat-int8"
-        headers = {"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"}
-        payload = {"messages": [{"role": "user", "content": prompt}]}
-        response = await asyncio.to_thread(
-            requests.post, cf_url, headers=headers, json=payload, timeout=45
-        )
-        response.raise_for_status()
-        result = response.json()
-        cf_text = result.get("result", {}).get("response")
-        if cf_text:
-            logger.info("Успішна відповідь від Cloudflare AI.")
-            return cf_text
-        else:
-            logger.error(f"Cloudflare AI повернув порожню відповідь: {result}")
-            return None
-    except Exception as e:
-        logger.error(f"Резервний варіант Cloudflare AI також не спрацював: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            cf_url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-2-7b-chat-int8"
+            headers = {"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"}
+            payload = {"messages": [{"role": "user", "content": prompt}]}
+            response = await asyncio.to_thread(
+                requests.post, cf_url, headers=headers, json=payload, timeout=45
+            )
+            response.raise_for_status()
+            result = response.json()
+            cf_text = result.get("result", {}).get("response")
+            if cf_text:
+                logger.info("Успішна відповідь від Cloudflare AI.")
+                return cf_text
+            else:
+                logger.error(f"Cloudflare AI повернув порожню відповідь: {result}")
+                return None
+        except Exception as e:
+            logger.error(f"Резервний варіант Cloudflare AI не спрацював на спробі {attempt+1}: {e}")
+            await asyncio.sleep(2 ** attempt)
+            continue
     
-    # Додана перевірка, якщо всі моделі не відповіли
     logger.error("Усі спроби генерації тексту ШІ не вдалися.")
     return None
-
-
-# --- Стани для ConversationHandler ---
-(SELECTING_CATEGORY, IN_CONVERSATION, WAITING_FOR_REPLY,
- WAITING_FOR_ANONYMOUS_MESSAGE, WAITING_FOR_ANONYMOUS_REPLY,
- WAITING_FOR_BROADCAST_MESSAGE, CONFIRMING_BROADCAST,
- WAITING_FOR_KB_KEY, WAITING_FOR_KB_VALUE, CONFIRMING_AI_REPLY,
- WAITING_FOR_NEWS_TEXT, CONFIRMING_NEWS_ACTION, WAITING_FOR_MEDIA,
- SELECTING_TEST_USER, WAITING_FOR_TEST_NAME, WAITING_FOR_TEST_ID,
- WAITING_FOR_TEST_MESSAGE, WAITING_FOR_KB_EDIT_VALUE,
- WAITING_FOR_SCHEDULE_TEXT, WAITING_FOR_SCHEDULE_TIME, CONFIRMING_SCHEDULE_POST) = range(21)
-
-
-# --- Сповіщення для адмінів ---
-def get_admin_name(admin_id: int) -> str:
-    admin_contacts = load_data(ADMIN_CONTACTS_FILE)
-    return admin_contacts.get(str(admin_id), f"Адміністратор {admin_id}")
-
-async def notify_other_admins(context: ContextTypes.DEFAULT_TYPE, replying_admin_id: int, original_message_text: str) -> None:
-    admin_name = get_admin_name(replying_admin_id)
-    notification_text = f"ℹ️ **{admin_name}** відповів на звернення:\n\n> _{original_message_text[:300]}..._"
-    for admin_id in ADMIN_IDS:
-        if admin_id != replying_admin_id:
-            try:
-                await context.bot.send_message(chat_id=admin_id, text=notification_text, parse_mode='Markdown')
-            except Exception as e:
-                logger.warning(f"Не вдалося надіслати сповіщення адміну {admin_id}: {e}")
-
-
-# --- Універсальний розсильник ---
-async def do_broadcast(context: ContextTypes.DEFAULT_TYPE | Application, text_content: str, photo: bytes | str | None = None, video: str | None = None) -> tuple[int, int]:
-    full_text_content = f"{text_content}"
-    
-    if isinstance(context, Application):
-        bot = context.bot
-        user_ids = context.bot_data.get('user_ids', set())
-    else: # ContextTypes.DEFAULT_TYPE
-        bot = context.bot
-        user_ids = context.bot_data.get('user_ids', set())
-
-    success, fail = 0, 0
-    # Фільтруємо не-Telegram ID (наприклад, web-ID, яких більше немає, але для безпеки)
-    telegram_user_ids = [uid for uid in user_ids if isinstance(uid, int)]
-    
-    for user_id in telegram_user_ids:
-        try:
-            if photo:
-                await bot.send_photo(user_id, photo=photo, caption=full_text_content, parse_mode='Markdown')
-            elif video:
-                await bot.send_video(user_id, video=video, caption=full_text_content, parse_mode='Markdown')
-            else:
-                if len(full_text_content) > 4096:
-                    for i in range(0, len(full_text_content), 4096):
-                        await bot.send_message(user_id, text=full_text_content[i:i + 4096])
-                else:
-                    await bot.send_message(user_id, text=full_text_content)
-            success += 1
-            await asyncio.sleep(0.05)
-        except Exception as e:
-            logger.warning(f"Не вдалося надіслати повідомлення користувачу {user_id}: {e}")
-            fail += 1
-    return success, fail
 
 async def generate_image(prompt: str) -> bytes | None:
     api_url = "https://api.stability.ai/v2beta/stable-image/generate/core"
@@ -372,33 +384,34 @@ async def generate_image(prompt: str) -> bytes | None:
         "output_format": "jpeg",
         "aspect_ratio": "1:1"
     }
-    try:
-        response = await asyncio.to_thread(
-            requests.post,
-            api_url,
-            headers=headers,
-            files={"none": ''},
-            data=data,
-            timeout=30
-        )
-        response.raise_for_status()
-        return response.content
-    except requests.RequestException as e:
-        logger.error(f"Помилка генерації зображення через Stability AI: {e}")
-        if e.response is not None:
-            logger.error(f"Відповідь сервера: {e.response.text}")
-        return None
-    except Exception as e:
-        logger.error(f"Невідома помилка при генерації зображення: {e}")
-        return None
-    
+    for attempt in range(3):
+        try:
+            response = await asyncio.to_thread(
+                requests.post,
+                api_url,
+                headers=headers,
+                files={"none": ''},
+                data=data,
+                timeout=30
+            )
+            response.raise_for_status()
+            return response.content
+        except requests.RequestException as e:
+            logger.error(f"Помилка генерації зображення через Stability AI на спробі {attempt+1}: {e}")
+            if e.response is not None:
+                logger.error(f"Відповідь сервера: {e.response.text}")
+            await asyncio.sleep(2 ** attempt)
+            continue
+        except Exception as e:
+            logger.error(f"Невідома помилка при генерації зображення: {e}")
+            await asyncio.sleep(2 ** attempt)
+            continue
+    return None
+
 def get_all_text_from_website() -> str | None:
     try:
-        base = GYMNASIUM_URL.rstrip('/')
-        url = base + "/"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        url = GYMNASIUM_URL.rstrip('/') + "/"
+        headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, timeout=15, headers=headers)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -408,8 +421,6 @@ def get_all_text_from_website() -> str | None:
 
         text = soup.body.get_text(separator='\n', strip=True)
         cleaned_text = re.sub(r'\n\s*\n', '\n\n', text)
-
-        logger.info(f"З сайту отримано {len(cleaned_text)} символів тексту.")
         return cleaned_text if cleaned_text else None
     except requests.RequestException as e:
         logger.error(f"Помилка отримання даних з сайту: {e}")
@@ -417,13 +428,11 @@ def get_all_text_from_website() -> str | None:
     except Exception as e:
         logger.error(f"Невідома помилка при парсингу сайту: {e}")
         return None
-    
+
 def get_teachers_info() -> str | None:
     try:
         url = "https://brodygymnasium.e-schools.info/teachers"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0'}
         response = requests.get(url, timeout=15, headers=headers)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -434,11 +443,8 @@ def get_teachers_info() -> str | None:
                 element.extract()
             text = content_area.get_text(separator='\n', strip=True)
             cleaned_text = re.sub(r'\n\s*\n', '\n', text)
-            logger.info(f"Зі сторінки вчителів отримано {len(cleaned_text)} символів.")
             return cleaned_text
-        else:
-            logger.warning("Не знайдено блок 'content-inner' на сторінці вчителів.")
-            return None
+        return None
     except requests.RequestException as e:
         logger.error(f"Помилка отримання даних про вчителів: {e}")
         return None
@@ -478,10 +484,6 @@ async def gather_all_context(query: str) -> str:
     return "\n\n".join(context_parts)
 
 async def try_ai_autoreply(user_question: str) -> str | None:
-    """
-    Намагається згенерувати відповідь ШІ. Використовує "м'яку перевірку"
-    через токени [CONFIDENT] / [UNCERTAIN].
-    """
     logger.info("Запускаю спробу авто відповіді ШІ...")
     
     additional_context = await gather_all_context(user_question)
@@ -647,8 +649,19 @@ async def admin_stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not query: return
     if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
-    user_count = len(context.bot_data.get('user_ids', set()))
-    await query.edit_message_text(f"📊 **Статистика бота:**\n\nВсього унікальних користувачів: {user_count}", parse_mode='Markdown')
+    
+    # Завантажуємо дані локально
+    user_data = load_data(USER_IDS_FILE)
+    user_count = len(user_data)
+    
+    # Виводимо інформацію
+    stats_text = f"📊 **Статистика бота:**\n\n"
+    stats_text += f"Всього унікальних користувачів: **{user_count}**\n"
+    stats_text += "\n_Ці дані автоматично синхронізуються з вкладкою 'Користувачі' у Google Sheets._"
+    
+    await query.edit_message_text(stats_text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ Назад до Адмін-панелі", callback_data="admin_panel")]
+    ]))
     
 async def start_kb_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -1093,14 +1106,24 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.bot_data['channel_posts'].insert(0, post_text)
     context.bot_data['channel_posts'] = context.bot_data['channel_posts'][:20]
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_user.id in ADMIN_IDS:
-        # Для адмінів одразу викликаємо адмін-панель
+    user = update.effective_user
+    
+    # Оновлення списку користувачів (статистика)
+    update_user_list(
+        user.id, 
+        user.username, 
+        user.first_name, 
+        user.last_name
+    )
+
+    if user.id in ADMIN_IDS:
         await admin_panel(update, context)
         return
 
     if 'user_ids' not in context.bot_data:
         context.bot_data['user_ids'] = set()
-    context.bot_data['user_ids'].add(update.effective_user.id)
+    context.bot_data['user_ids'].add(user.id)
+    # Зберігаємо локально для кешування (синхронізація з sheets відбувається всередині save_data)
     save_data(list(context.bot_data['user_ids']), 'user_ids.json')
     await update.message.reply_text(
         'Вітаємо! Це офіційний бот каналу новин Бродівської гімназії.\n\n'
@@ -1110,6 +1133,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
+    
+    # Оновлення списку користувачів (статистика)
+    user = update.effective_user
+    update_user_list(
+        user.id, 
+        user.username, 
+        user.first_name, 
+        user.last_name
+    )
     
     if user_id in ADMIN_IDS:
         help_text = (
@@ -1278,7 +1310,6 @@ async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TY
     await update.message.reply_text("✅ Доповнення надіслано.")
     return IN_CONVERSATION
 async def anonymous_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    # ВИПРАВЛЕНО: Адмінам дозволено створювати анонімні звернення (для тестування)
     
     if update.effective_user.id in ADMIN_IDS:
         await update.message.reply_text("Напишіть ваше анонімне повідомлення (як адмін). /cancel для скасування.")
@@ -1815,17 +1846,15 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             'Операцію скасовано.',
             reply_markup=ReplyKeyboardRemove()
         )
-        # ВИПРАВЛЕНО: При скасуванні, якщо є ID повідомлення, його треба прибрати
         if 'original_message_id' in context.chat_data and update.effective_chat.id in ADMIN_IDS:
              try:
-                # Намагаємося видалити кнопки
                 await context.bot.edit_message_reply_markup(
                     chat_id=update.effective_chat.id,
                     message_id=context.chat_data['original_message_id'],
                     reply_markup=None
                 )
              except Exception:
-                 pass # Ігноруємо помилку, якщо повідомлення вже змінене або видалене
+                 pass 
                  
         context.user_data.clear()
         context.chat_data.clear()
@@ -1964,25 +1993,18 @@ async def receive_test_message(update: Update, context: ContextTypes.DEFAULT_TYP
 async def ping_self_for_wakeup(context: ContextTypes.DEFAULT_TYPE):
     """
     Надсилає HTTP-запит до самого себе, щоб запобігти засинанню сервісу Render.
-    Цей запит надсилається на основний URL бота (WEBHOOK_URL).
     """
-    if not WEBHOOK_URL:
-        logger.error("WEBHOOK_URL не встановлено, функція 'пінг' не може бути виконана.")
+    if not RENDER_EXTERNAL_URL:
+        logger.error("RENDER_EXTERNAL_URL не встановлено, функція 'пінг' не може бути виконана.")
         return
-    
-    # Використовуємо rstrip('/') для уникнення подвійних слешів,
-    # і надсилаємо запит на кореневий шлях, який має відповідати 200 OK.
+        
     ping_url = RENDER_EXTERNAL_URL.rstrip('/') + '/'
     
     try:
-        # Використовуємо aiohttp для асинхронного запиту, якщо це можливо, 
-        # але для простоти і незалежності від контексту, використовуємо requests в окремому потоці.
-        # Встановлюємо короткий таймаут
         response = await asyncio.to_thread(requests.get, ping_url, timeout=5)
         response.raise_for_status() 
         logger.info(f"✅ Успішний пінг самого себе ({ping_url}). Статус: {response.status_code}")
     except requests.RequestException as e:
-        # Render може призупинитись, і перший пінг може видати помилку, але це вже розбудить сервіс.
         logger.warning(f"❌ Помилка пінг-запиту, але це, можливо, розбудило Render: {e}")
     except Exception as e:
         logger.error(f"Невідома помилка під час пінг-запиту: {e}")
@@ -2033,9 +2055,17 @@ async def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # --- Налаштування даних бота та обробників ---
-    raw_user_ids = load_data('user_ids.json', [])
-    application.bot_data['user_ids'] = set(raw_user_ids)
+    
+    # Завантаження початкових даних (викликає синхронізацію з Sheets, якщо локальний кеш порожній)
+    application.bot_data['kb_data'] = load_data(KNOWLEDGE_BASE_FILE)
+    application.bot_data['admin_contacts'] = load_data(ADMIN_CONTACTS_FILE)
+    
+    # Завантаження ID користувачів
+    user_data = load_data(USER_IDS_FILE)
+    application.bot_data['user_ids'] = {user['id'] for user in user_data if 'id' in user}
     application.bot_data['anonymous_map'] = {}
+    logger.info(f"Завантажено {len(application.bot_data['user_ids'])} унікальних ID користувачів.")
+
 
     user_conv = ConversationHandler(
         entry_points=[MessageHandler(filters.TEXT & ~filters.COMMAND | filters.PHOTO | filters.VIDEO, start_conversation)],
@@ -2172,11 +2202,10 @@ async def main() -> None:
     application.job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
     
     # ДОДАНО: Задача для запобігання засинанню (кожні 10 хвилин)
-    # 600 секунд = 10 хвилин
     application.job_queue.run_repeating(
         ping_self_for_wakeup,
         interval=600,
-        first=10, # Запуск через 10 секунд після старту, щоб дати час на запуск веб-сервера
+        first=10, 
         name='self_ping_job'
     )
     logger.info("Задача на запобігання засинанню (пінг) встановлена на кожні 10 хвилин.")
