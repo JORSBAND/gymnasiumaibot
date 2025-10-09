@@ -68,6 +68,18 @@ GCP_CREDENTIALS_JSON = os.environ.get("GCP_CREDENTIALS_JSON", "{}")
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# --- СТАНИ ДЛЯ CONVERSATIONHANDLER (ПОВНИЙ СПИСОК) ---
+# Цей блок повинен бути перед усіма хендлерами, що його використовують
+(SELECTING_CATEGORY, IN_CONVERSATION, WAITING_FOR_REPLY,
+ WAITING_FOR_ANONYMOUS_MESSAGE, WAITING_FOR_ANONYMOUS_REPLY,
+ WAITING_FOR_BROADCAST_MESSAGE, CONFIRMING_BROADCAST,
+ WAITING_FOR_KB_KEY, WAITING_FOR_KB_VALUE, CONFIRMING_AI_REPLY,
+ WAITING_FOR_NEWS_TEXT, CONFIRMING_NEWS_ACTION, WAITING_FOR_MEDIA,
+ SELECTING_TEST_USER, WAITING_FOR_TEST_NAME, WAITING_FOR_TEST_ID,
+ WAITING_FOR_TEST_MESSAGE, WAITING_FOR_KB_EDIT_VALUE,
+ WAITING_FOR_SCHEDULE_TEXT, WAITING_FOR_SCHEDULE_TIME, CONFIRMING_SCHEDULE_POST) = range(21)
+
+
 # --- GOOGLE SHEETS УТИЛІТИ ---
 
 GSHEET_SCOPE = [
@@ -2064,6 +2076,7 @@ async def main() -> None:
     user_data = load_data(USER_IDS_FILE)
     
     # === ФІКС ПОМИЛКИ: САНІТИЗАЦІЯ ДАНИХ КОРИСТУВАЧІВ (Migration) ===
+    # Виправлення проблеми, коли старі ID зберігалися як прості числа (int)
     sanitized_user_data = []
     for item in user_data:
         if isinstance(item, dict) and 'id' in item:
