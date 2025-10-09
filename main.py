@@ -340,13 +340,17 @@ def update_user_list(user_id: int, username: str | None, first_name: str | None,
     
     full_name = ' '.join(filter(None, [first_name, last_name]))
     
-    # Шукаємо існуючого користувача за ID
+    # Виправляємо проблему: якщо load_data повернув старий формат [1, 2, 3...], 
+    # він буде мігрувати його в main(), але тут він може знову прочитати старий кеш.
+    # Ми перевіряємо, чи елемент є словником, перш ніж викликати .get()
+    
     found = False
-    for user in user_data:
-        if user.get('id') == user_id:
-            user['username'] = username or user.get('username')
-            user['full_name'] = full_name
-            user['last_run'] = datetime.now(pytz.timezone("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M:%S")
+    for i, user_item in enumerate(user_data):
+        if isinstance(user_item, dict) and user_item.get('id') == user_id:
+            # Знайдено: оновлюємо дані
+            user_data[i]['username'] = username or user_data[i].get('username')
+            user_data[i]['full_name'] = full_name
+            user_data[i]['last_run'] = datetime.now(pytz.timezone("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M:%S")
             found = True
             break
             
@@ -1189,7 +1193,7 @@ async def generate_post_from_site(update: Update, context: ContextTypes.DEFAULT_
         try:
             await query.edit_message_text(f"❌ *Сталася помилка:* {e}")
         except:
-            await context.bot.send_message(query.from_user.id, f"❌ *Сталася помилка:* {e}")
+            await context.bot.send_message(query.from_user.id, f"❌ *Сталася помижка:* {e}")
 async def handle_post_broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
