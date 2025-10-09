@@ -3,7 +3,7 @@ import asyncio
 import uuid
 import json
 import logging
-# import time # ВИДАЛЕНО, використовуємо asyncio.sleep
+import time # Додано для експоненційного відступу
 from datetime import datetime, time as dt_time
 import google.generativeai as genai
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ReplyKeyboardRemove
@@ -39,24 +39,15 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://gymnasiumai
 WEBHOOK_PATH = f"/{TELEGRAM_BOT_TOKEN}"
 WEBHOOK_URL = RENDER_EXTERNAL_URL.rstrip('/') + WEBHOOK_PATH
 
-# --- ЛОКАЛЬНІ ДАНІ ДЛЯ МІГРАЦІЇ (ВИДАЛИТИ ПІСЛЯ УСПІШНОЇ МІГРАЦІЇ) ---
-# Ці дані використовуються тільки для першого заповнення листа "Адміністратори"
-INITIAL_ADMIN_IDS = [
-    838464083, # Example Admin 1
-    6484405296, # Example Admin 2
-    1374181841, # Example Admin 3
-    5268287971, # Example Admin 4
+ADMIN_IDS = [
+    838464083,
+    6484405296,
+    1374181841,
+    5268287971,
 ]
-INITIAL_ADMIN_CONTACTS = {
-    838464083: "Ярослав",
-    6484405296: "Оксана",
-    1374181841: "Андрій",
-    5268287971: "Тетяна",
-}
-# ----------------------------------------------------------------------
-
 GYMNASIUM_URL = "https://brodygymnasium.e-schools.info"
 TARGET_CHANNEL_ID = -1002946740131
+ADMIN_CONTACTS_FILE = 'admin_contacts.json'
 CONVERSATIONS_FILE = 'conversations.json'
 SCHEDULED_POSTS_FILE = 'scheduled_posts.json'
 KNOWLEDGE_BASE_FILE = 'knowledge_base.json' # Локальний кеш бази знань
@@ -69,14 +60,13 @@ GSHEET_NAME = os.environ.get("GSHEET_NAME", "Бродівська гімназі
 GSHEET_WORKSHEET_NAME = os.environ.get("GSHEET_WORKSHEET_NAME", "База_Знань")
 # Назва листа (вкладки) у таблиці для Користувачів
 USERS_GSHEET_WORKSHEET_NAME = os.environ.get("USERS_GSHEET_WORKSHEET_NAME", "Користувачі")
-# НОВА ЗМІННА: Назва листа (вкладки) у таблиці для Адміністраторів
-ADMIN_GSHEET_WORKSHEET_NAME = os.environ.get("ADMIN_GSHEET_WORKSHEET_NAME", "Адміністратори")
 # JSON-ключі сервісного облікового запису (як змінна оточення)
 GCP_CREDENTIALS_JSON = os.environ.get("GCP_CREDENTIALS_JSON", "{}") 
 
 # --- КЛЮЧІ ДЛЯ БАЗИ ЗНАНЬ ---
 KB_KEY_QUESTION = "Питання"
 KB_KEY_ANSWER = "Відповідь"
+# НОВИЙ КЛЮЧ: Використовується для позначення запису як FAQ (будь-яке значення, окрім пустого)
 KB_KEY_IS_FAQ = "FAQ" 
 # --- Кінець налаштувань ---
 
@@ -85,6 +75,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- СТАНИ ДЛЯ CONVERSATIONHANDLER (ПОВНИЙ СПИСОК) ---
+# Цей блок повинен бути перед усіма хендлерами, що його використовують
 (SELECTING_CATEGORY, IN_CONVERSATION, WAITING_FOR_REPLY,
  WAITING_FOR_ANONYMOUS_MESSAGE, WAITING_FOR_ANONYMOUS_REPLY,
  WAITING_FOR_BROADCAST_MESSAGE, CONFIRMING_BROADCAST,
@@ -93,7 +84,7 @@ logger = logging.getLogger(__name__)
  SELECTING_TEST_USER, WAITING_FOR_TEST_NAME, WAITING_FOR_TEST_ID,
  WAITING_FOR_TEST_MESSAGE, WAITING_FOR_KB_EDIT_VALUE,
  WAITING_FOR_SCHEDULE_TEXT, WAITING_FOR_SCHEDULE_TIME, CONFIRMING_SCHEDULE_POST,
- WAITING_FOR_ADMIN_MESSAGE) = range(22) 
+ **WAITING_FOR_ADMIN_MESSAGE**) = range(22) # Змінено range на 22
 # --- GOOGLE SHEETS УТИЛІТИ ---
 
 GSHEET_SCOPE = [
@@ -101,118 +92,13 @@ GSHEET_SCOPE = [
     'https://www.googleapis.com/auth/drive'
 ]
 
-# НОВА ФУНКЦІЯ: Збереження даних адміністраторів (для міграції)
-def save_admin_data_to_gsheet(admin_data: list[dict]) -> bool:
-    """Зберігає список адміністраторів у Google Sheets (лист Адміністратори)."""
-    worksheet = get_gsheet_client(ADMIN_GSHEET_WORKSHEET_NAME)
-    if not worksheet:
-        logger.error("Не вдалося отримати клієнт Google Sheets для збереження адміністраторів.")
-        return False
-    
-    try:
-        # Форматуємо дані: [["ID", "Ім'я", "Активний"], ...]
-        records = [['ID', 'Ім\'я', 'Активний']] 
-        
-        for user in admin_data:
-            # Використовуємо "+" для активних
-            status = '+' if user.get('is_active') else '-' 
-            records.append([
-                user.get('id', ''),
-                user.get('name', 'N/A'),
-                status
-            ])
-        
-        # Очищуємо весь лист і завантажуємо нові дані
-        worksheet.batch_clear(["A1:C1000"])
-        worksheet.update('A1', records)
-        logger.info(f"✅ Успішно збережено {len(admin_data)} записів адміністраторів у Google Sheets.")
-        return True
-    except Exception as e:
-        logger.error(f"Помилка запису адміністраторів в Google Sheets: {e}")
-        return False
-
-# НОВА ФУНКЦІЯ: Завантаження даних адміністраторів
-def load_admin_data(migrate_if_empty: bool = False) -> tuple[list[int], dict[int, str]]:
-    """Завантажує ID адміністраторів та їхні імена з Google Sheets."""
-    worksheet = get_gsheet_client(ADMIN_GSHEET_WORKSHEET_NAME)
-    if not worksheet:
-        logger.error("Не вдалося отримати клієнт для листа адміністраторів.")
-        return [], {}
-    
-    admin_ids = []
-    admin_contacts = {}
-    
-    try:
-        list_of_lists = worksheet.get_all_values()
-        
-        # --- ЛОГІКА МІГРАЦІЇ ---
-        if migrate_if_empty and (not list_of_lists or (len(list_of_lists) == 1 and not list_of_lists[0][0])):
-            logger.warning("Лист адміністраторів порожній. Запускаю міграцію з локальних констант.")
-            
-            admin_records = []
-            for user_id in INITIAL_ADMIN_IDS:
-                name = INITIAL_ADMIN_CONTACTS.get(user_id, f"Адмін {user_id}")
-                admin_records.append({
-                    'id': user_id, 
-                    'name': name, 
-                    'is_active': True
-                }) 
-            
-            # Зберігаємо мігровані дані в Sheets (синхронний запис)
-            if admin_records:
-                save_admin_data_to_gsheet(admin_records)
-                logger.info(f"Міграція завершена. Перезавантажую дані.")
-                # Отримуємо дані ще раз після запису
-                list_of_lists = get_gsheet_client(ADMIN_GSHEET_WORKSHEET_NAME).get_all_values() if get_gsheet_client(ADMIN_GSHEET_WORKSHEET_NAME) else []
-
-        # --- КІНЕЦЬ ЛОГІКИ МІГРАЦІЇ ---
-
-        if not list_of_lists or len(list_of_lists) < 2:
-            return [], {}
-        
-        header = [h.strip() for h in list_of_lists[0]]
-        
-        # Ідентифікація стовпців
-        id_idx = header.index('ID') if 'ID' in header else -1
-        name_idx = header.index('Ім\'я') if 'Ім\'я' in header else -1
-        active_idx = header.index('Активний') if 'Активний' in header else -1
-
-        if id_idx == -1:
-            logger.error("Лист адміністраторів не містить стовпця 'ID'.")
-            return [], {}
-
-        for row in list_of_lists[1:]:
-            try:
-                user_id = int(row[id_idx].strip())
-                
-                # Перевіряємо активність: '+' або 'x' або 'true'
-                active_status = row[active_idx].strip().lower() if active_idx >= 0 and len(row) > active_idx else ''
-                is_active = active_status in ['x', 'true', '+']
-                
-                name = row[name_idx].strip() if name_idx >= 0 and len(row) > name_idx else f"Адмін {user_id}"
-
-                if is_active:
-                    admin_ids.append(user_id)
-                    admin_contacts[user_id] = name
-            except (ValueError, IndexError):
-                # Ігноруємо рядки з невірним форматом ID або відсутніми даними
-                continue
-                
-        logger.info(f"✅ Успішно завантажено {len(admin_ids)} активних адміністраторів з Sheets.")
-        return admin_ids, admin_contacts
-
-    except Exception as e:
-        logger.error(f"Помилка читання даних адміністраторів з Google Sheets: {e}")
-        return [], {}
-
-
 def get_gsheet_client(worksheet_name: str):
     """Створює та повертає gspread клієнт для взаємодії з конкретним листом."""
     try:
         # Для коректного парсингу
         creds_dict = json.loads(GCP_CREDENTIALS_JSON)
         if not creds_dict or "private_key" not in creds_dict:
-            # Це може статися на Render, якщо змінна оточення не встановлена.
+            logger.error(f"GCP_CREDENTIALS_JSON порожній або невірний. Неможливо підключитися до Google Sheets (лист: {worksheet_name}).")
             return None
             
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, GSHEET_SCOPE)
@@ -232,27 +118,6 @@ def get_gsheet_client(worksheet_name: str):
     except Exception as e:
         logger.error(f"Помилка ініціалізації GSheet Client (лист: {worksheet_name}): {e}")
         return None
-
-# ВИПРАВЛЕНО: Функція get_admin_name тепер використовує глобальний словник контактів
-def get_admin_name(admin_id: int) -> str:
-    """Повертає ім'я адміністратора за ID з кешованих даних."""
-    # admin_contacts зберігається у application.bot_data['admin_contacts']
-    # Але викликається поза контекстом, тому шукаємо його в глобальних даних (якщо ініціалізовано)
-    # Оскільки ця функція часто викликається з logger.error або notify_other_admins,
-    # безпечніше передавати context, але для сумісності з попереднім кодом:
-    
-    # ПРИМІТКА: Для коректної роботи ця функція має бути викликана ПІСЛЯ application.bot_data заповнено.
-    # Для цього ми використовуємо її тільки в контекстних обробниках.
-    
-    # Запускаємо впевнено, що application.bot_data вже існує після main()
-    try:
-        app = Application.get_instance()
-        admin_contacts = app.bot_data.get('admin_contacts', {})
-        return admin_contacts.get(admin_id, f"Адміністратор {admin_id}")
-    except Exception:
-        # У разі виклику поза контекстом (що рідко, але буває), використовуємо заглушку
-        return f"Адміністратор {admin_id}"
-
 
 def save_data_to_gsheet(kb_data: Dict[str, dict]) -> bool:
     """Зберігає поточну базу знань у Google Sheets."""
@@ -293,9 +158,11 @@ def save_users_to_gsheet(users: list[dict]) -> bool:
         records = [["ID", "Ім'я користувача", "Дата останнього запуску"]] 
         
         for user in users:
+            # === ВИПРАВЛЕННЯ: Додано перевірку, чи є елемент словником ===
             if not isinstance(user, dict):
                  logger.warning(f"Пропущено невірний елемент користувача (не словник) при записі у Sheets: {user}")
                  continue
+            # ==========================================================
 
             records.append([
                 user.get('id', ''),
@@ -333,7 +200,7 @@ def fetch_kb_from_sheets() -> Dict[str, dict] | None:
         header = [h.strip() for h in list_of_lists[0]]
         q_idx = header.index(KB_KEY_QUESTION) if KB_KEY_QUESTION in header else 0
         a_idx = header.index(KB_KEY_ANSWER) if KB_KEY_ANSWER in header else 1
-        faq_idx = header.index(KB_KEY_IS_FAQ) if KB_KEY_IS_FAQ in header else -1 
+        faq_idx = header.index(KB_KEY_IS_FAQ) if KB_KEY_IS_FAQ in header else -1 # -1, якщо FAQ стовпця немає
         
         data_rows = list_of_lists[1:]
         kb = {}
@@ -478,6 +345,8 @@ def update_user_list(user_id: int, username: str | None, first_name: str | None,
     
     full_name = ' '.join(filter(None, [first_name, last_name]))
     
+    # Виправляємо проблему: якщо load_data повернув старий формат [1, 2, 3...], 
+    # він буде мігрувати його в main(), але тут він може знову прочитати старий кеш.
     # Ми перевіряємо, чи елемент є словником, перш ніж викликати .get()
     
     found = False
@@ -732,10 +601,7 @@ async def propose_website_update(context: ContextTypes.DEFAULT_TYPE, text_conten
     ]
     message = f"**Знайдено оновлення на сайті!**\n\n**Новий вміст:**\n---\n{truncated_text}"
 
-    # Використовуємо глобально завантажений список ID адміністраторів
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-
-    for admin_id in admin_ids:
+    for admin_id in ADMIN_IDS:
         try:
             await context.bot.send_message(
                 chat_id=admin_id, text=message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown'
@@ -767,9 +633,7 @@ async def website_update_handler(update: Update, context: ContextTypes.DEFAULT_T
         del context.bot_data[broadcast_id]
         
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Використовуємо глобально завантажений список ID адміністраторів
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if update.effective_user.id not in admin_ids: return # Перевірка прав доступу
+    if update.effective_user.id not in ADMIN_IDS: return # Перевірка прав доступу
     
     keyboard = [
         [
@@ -795,10 +659,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def start_notify_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    
-    # Використовуємо глобально завантажений список ID адміністраторів
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
     
     await query.edit_message_text(
@@ -813,7 +674,6 @@ async def receive_admin_message(update: Update, context: ContextTypes.DEFAULT_TY
     message = update.message
     
     text = message.caption or message.text or ""
-    # Отримання file_id для медіа
     photo = message.photo[-1].file_id if message.photo else None
     video = message.video.file_id if message.video else None
 
@@ -826,10 +686,7 @@ async def receive_admin_message(update: Update, context: ContextTypes.DEFAULT_TY
     success_count = 0
     fail_count = 0
     
-    # Використовуємо глобально завантажений список ID адміністраторів
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-
-    for admin_id in admin_ids:
+    for admin_id in ADMIN_IDS:
         if admin_id != sender_id: # Надсилаємо всім, крім відправника
             try:
                 if photo:
@@ -851,8 +708,7 @@ async def receive_admin_message(update: Update, context: ContextTypes.DEFAULT_TY
 # КІНЕЦЬ НОВОГО БЛОКУ
 
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if update.effective_user.id not in admin_ids: return # Перевірка прав доступу
+    if update.effective_user.id not in ADMIN_IDS: return # Перевірка прав доступу
     
     info_text_1 = (
         "🔐 **Інструкція для Адміністратора**\n\n"
@@ -907,8 +763,7 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def admin_stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return
+    if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
     
     # Завантажуємо дані локально
@@ -927,8 +782,7 @@ async def admin_stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def start_kb_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
     await query.edit_message_text("Введіть **ключ** для нових даних (наприклад, 'Директор').\n\nДля скасування введіть /cancel.", parse_mode='Markdown')
     return WAITING_FOR_KB_KEY
@@ -962,8 +816,7 @@ async def get_kb_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 async def view_kb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return
+    if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
     
     # Завантажуємо актуальні дані (з Sheets, якщо локальний кеш неактуальний)
@@ -1014,8 +867,7 @@ async def view_kb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def toggle_kb_faq_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return
+    if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
 
     key_hash = query.data.split(':', 1)[1]
@@ -1069,8 +921,7 @@ async def toggle_kb_faq_status(update: Update, context: ContextTypes.DEFAULT_TYP
 async def delete_kb_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return
+    if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
     
     key_hash = query.data.split(':', 1)[1]
@@ -1091,8 +942,7 @@ async def delete_kb_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 async def start_kb_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
 
     key_hash = query.data.split(':', 1)[1]
@@ -1209,8 +1059,7 @@ def remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
 async def start_schedule_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
     await query.edit_message_text("Надішліть текст для запланованої новини. /cancel для скасування.")
     return WAITING_FOR_SCHEDULE_TEXT
@@ -1307,8 +1156,7 @@ async def cancel_schedule_post(update: Update, context: ContextTypes.DEFAULT_TYP
 async def view_scheduled_posts(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return
+    if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
     
     scheduled_posts = load_data('scheduled_posts.json', [])
@@ -1340,8 +1188,7 @@ async def view_scheduled_posts(update: Update, context: ContextTypes.DEFAULT_TYP
 async def cancel_scheduled_job_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return
+    if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
     
     job_name = query.data.split(':', 1)[1]
@@ -1357,8 +1204,7 @@ async def cancel_scheduled_job_button(update: Update, context: ContextTypes.DEFA
 async def generate_post_from_site(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return
+    if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
     await query.edit_message_text("⏳ *Збираю дані з сайту...*", parse_mode='Markdown')
 
@@ -1416,8 +1262,7 @@ async def generate_post_from_site(update: Update, context: ContextTypes.DEFAULT_
 async def handle_post_broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return
+    if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
     action, post_id = query.data.split(':', 1)
     post_data_key = f"manual_post_{post_id}"
@@ -1467,9 +1312,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user.last_name
     )
 
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-
-    if user.id in admin_ids:
+    if user.id in ADMIN_IDS:
         await admin_panel(update, context)
         return
 
@@ -1496,9 +1339,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user.last_name
     )
     
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-
-    if user_id in admin_ids:
+    if user_id in ADMIN_IDS:
         help_text = (
             "🔐 **Адміністративна Допомога**\n\n"
             "**Основні функції:**\n"
@@ -1523,8 +1364,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.message.reply_text(help_text, parse_mode='Markdown')
 
 async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if update.effective_user.id in admin_ids:
+    if update.effective_user.id in ADMIN_IDS:
         await update.message.reply_text("Адміністратори не можуть створювати звернення. Використовуйте /admin для доступу до панелі.")
         return ConversationHandler.END
 
@@ -1560,7 +1400,7 @@ async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"**Запит:**\n---\n{text}\n\n"
             f"**Відповідь ШІ:**\n---\n{ai_response}"
         )
-        for admin_id in admin_ids:
+        for admin_id in ADMIN_IDS:
             try:
                 await context.bot.send_message(chat_id=admin_id, text=notification_text, parse_mode='Markdown')
             except Exception as e:
@@ -1610,9 +1450,7 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     f"**Від:** {user_info['name']} (ID: {user_info['id']})\n\n"
                     f"**Текст:**\n---\n{user_message}")
 
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-
-    for admin_id in admin_ids:
+    for admin_id in ADMIN_IDS:
         try:
             if media_type == 'photo':
                 await context.bot.send_photo(chat_id=admin_id, photo=file_id, caption=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -1628,8 +1466,7 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return IN_CONVERSATION
 
 async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if update.effective_user.id in admin_ids: return ConversationHandler.END # Адміни не ведуть розмови тут
+    if update.effective_user.id in ADMIN_IDS: return ConversationHandler.END # Адміни не ведуть розмови тут
 
     user_info = context.user_data.get('user_info', {'id': update.effective_user.id, 'name': update.effective_user.full_name})
     category = context.user_data.get('category', 'Без категорії')
@@ -1655,7 +1492,7 @@ async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TY
                     f"**Від:** {user_info['name']} (ID: {user_info['id']})\n\n"
                     f"**Текст:**\n---\n{update.message.text or update.message.caption or ''}")
 
-    for admin_id in admin_ids:
+    for admin_id in ADMIN_IDS:
         try:
             if update.message.photo:
                 await context.bot.send_photo(admin_id, photo=update.message.photo[-1].file_id, caption=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -1670,9 +1507,7 @@ async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TY
     return IN_CONVERSATION
 async def anonymous_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-
-    if update.effective_user.id in admin_ids:
+    if update.effective_user.id in ADMIN_IDS:
         await update.message.reply_text("Напишіть ваше анонімне повідомлення (як адмін). /cancel для скасування.")
     else:
         await update.message.reply_text("Напишіть ваше анонімне повідомлення... Для скасування введіть /cancel.")
@@ -1684,8 +1519,8 @@ async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAUL
     message_text = update.message.text
     
     # 1. Збереження повідомлення в історію
-    conversations = load_data('conversations.json', {})
     user_id_str = str(user_id)
+    conversations = load_data('conversations.json', {})
     if user_id_str not in conversations: conversations[user_id_str] = []
     conversations[user_id_str].append({"sender": "user", "text": f"(Анонімно) {message_text}", "timestamp": datetime.now().isoformat()})
     save_data(conversations, 'conversations.json')
@@ -1693,8 +1528,6 @@ async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAUL
     # 2. Спроба авто-відповіді ШІ
     ai_response = await try_ai_autoreply(message_text)
     
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-
     if ai_response:
         # АВТО-ВІДПОВІДЬ ЗНАЙДЕНА
         
@@ -1702,21 +1535,21 @@ async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAUL
         await send_telegram_reply(context.application, user_id, f"🤫 **Відповідь на ваше анонімне звернення (від ШІ):**\n\n{ai_response}")
         
         # Сповіщення адмінів про автоматичну відповідь
-        admin_note = " [ТЕСТ]" if user_id in admin_ids else ""
+        admin_note = " [ТЕСТ]" if user_id in ADMIN_IDS else ""
         notification_text = (
             f"✅ **АВТО-ВІДПОВІДЬ АНОНІМУ (ШІ){admin_note}**\n\n"
             f"**ID:** {user_id}\n"
             f"**Запит:**\n---\n{message_text}\n\n"
             f"**Відповідь ШІ:**\n---\n{ai_response}"
         )
-        for admin_id in admin_ids:
+        for admin_id in ADMIN_IDS:
             try:
                 await context.bot.send_message(chat_id=admin_id, text=notification_text, parse_mode='Markdown')
             except Exception as e:
                 logger.error(f"Не змогли переслати сповіщення про авто-відповідь адміну {admin_id}: {e}")
 
         # Закінчуємо розмову
-        if user_id in admin_ids:
+        if user_id in ADMIN_IDS:
             await update.message.reply_text("✅ Ваше тестове анонімне повідомлення було оброблено ШІ.")
         else:
             await update.message.reply_text("✅ Ваше анонімне повідомлення надіслано (оброблено ШІ).")
@@ -1737,16 +1570,16 @@ async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAUL
         reply_markup = InlineKeyboardMarkup(keyboard)
 
         # Додаємо примітку, якщо це тестове звернення від адміна
-        admin_note = " [ТЕСТ]" if user_id in admin_ids else ""
+        admin_note = " [ТЕСТ]" if user_id in ADMIN_IDS else ""
         forward_text = f"🤫 **Нове анонімне звернення (Ручна обробка){admin_note} (ID: {anon_id})**\n\n**Текст:**\n---\n{message_text}"
         
-        for admin_id in admin_ids:
+        for admin_id in ADMIN_IDS:
             try:
                 await context.bot.send_message(chat_id=admin_id, text=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
             except Exception as e:
                 logger.error(f"Не вдалося переслати анонімне адміну {admin_id}: {e}")
                 
-        if user_id in admin_ids:
+        if user_id in ADMIN_IDS:
             await update.message.reply_text("✅ Ваше тестове анонімне повідомлення надіслано адміністраторам.")
         else:
             await update.message.reply_text("✅ Ваше анонімне повідомлення надіслано.")
@@ -1756,8 +1589,7 @@ async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAUL
 async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
     await query.edit_message_text("Надішліть повідомлення для розсилки. /cancel для скасування.")
     return WAITING_FOR_BROADCAST_MESSAGE
@@ -1793,8 +1625,7 @@ async def cancel_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def start_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
     action, target_user_id_str = query.data.split(':', 1)
 
@@ -1858,8 +1689,7 @@ async def start_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 async def send_ai_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
 
     ai_response_text = context.chat_data.get('ai_response')
@@ -1944,8 +1774,7 @@ async def receive_manual_reply(update: Update, context: ContextTypes.DEFAULT_TYP
 async def start_anonymous_ai_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
     _, anon_id = query.data.split(':', 1)
 
@@ -1992,8 +1821,7 @@ async def start_anonymous_ai_reply(update: Update, context: ContextTypes.DEFAULT
 async def send_anonymous_ai_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
     _, anon_id = query.data.split(':', 1)
 
@@ -2008,7 +1836,7 @@ async def send_anonymous_ai_reply_to_user(update: Update, context: ContextTypes.
     try:
         await send_telegram_reply(context.application, user_id, f"🤫 **Відповідь на ваше анонімне звернення (від ШІ):**\n\n{ai_response_text}")
         
-        # ВИПРАВЛЕНО: Редагуємо повідомлення, щоб позначити, що на його відповіли
+        # ВИПРАВЛЕНО: Редагуємо повідомлення, щоб позначити, що на нього відповіли
         original_text = query.message.text.split("\n\n🤖 **Ось відповідь від ШІ для аноніма")[0]
         final_text = f"{original_text}\n\n✅ **ВІДПОВІДЬ АНОНІМУ НАДІСЛАНА (ШІ).**"
         
@@ -2025,8 +1853,7 @@ async def send_anonymous_ai_reply_to_user(update: Update, context: ContextTypes.
 async def start_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
     _, anon_id = query.data.split(':', 1)
     context.chat_data['anon_id_to_reply'] = anon_id
@@ -2077,8 +1904,7 @@ async def send_anonymous_reply(update: Update, context: ContextTypes.DEFAULT_TYP
     context.chat_data.clear()
     return ConversationHandler.END
 async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if update.effective_user.id not in admin_ids: return
+    if update.effective_user.id not in ADMIN_IDS: return
     replied_message = update.message.reply_to_message
     if not replied_message or replied_message.from_user.id != context.bot.id: return
 
@@ -2125,8 +1951,7 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
 async def start_news_creation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
     await query.edit_message_text("Будь ласка, надішліть текст для вашої новини. /cancel для скасування.")
     return WAITING_FOR_NEWS_TEXT
@@ -2141,8 +1966,7 @@ async def get_news_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 async def handle_news_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
     action = query.data
     news_text = context.chat_data.get('news_text')
@@ -2218,8 +2042,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             'Операцію скасовано.',
             reply_markup=ReplyKeyboardRemove()
         )
-        admin_ids = list(context.application.bot_data.get('admin_ids', []))
-        if 'original_message_id' in context.chat_data and update.effective_chat.id in admin_ids:
+        if 'original_message_id' in context.chat_data and update.effective_chat.id in ADMIN_IDS:
              try:
                 await context.bot.edit_message_reply_markup(
                     chat_id=update.effective_chat.id,
@@ -2239,8 +2062,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return ConversationHandler.END
 async def test_site_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if update.effective_user and update.effective_user.id not in admin_ids: return
+    if update.effective_user and update.effective_user.id not in ADMIN_IDS: return
     await update.message.reply_text("🔍 *Запускаю тестову перевірку сайту...*")
     site_text = get_all_text_from_website()
     if not site_text:
@@ -2249,8 +2071,7 @@ async def test_site_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     message = f"✅ Успішно отримано {len(site_text)} символів з сайту.\n\n**Початок тексту:**\n\n{site_text[:500]}..."
     await update.message.reply_text(message)
 async def test_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if update.effective_user and update.effective_user.id not in admin_ids: return
+    if update.effective_user and update.effective_user.id not in ADMIN_IDS: return
     await update.message.reply_text("🔍 *Тестую систему ШІ з резервуванням...*")
     response = await generate_text_with_fallback("Привіт! Скажи 'тест успішний'")
     if response:
@@ -2258,8 +2079,7 @@ async def test_ai_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     else:
         await update.message.reply_text("❌ Помилка: жоден із сервісів ШІ (Gemini, Cloudflare) не відповів.")
 async def test_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if update.effective_user and update.effective_user.id not in admin_ids: return
+    if update.effective_user and update.effective_user.id not in ADMIN_IDS: return
     await update.message.reply_text("🔍 *Тестую Stability AI API...*")
     try:
         image_bytes = await generate_image("school emblem")
@@ -2271,8 +2091,7 @@ async def test_image_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.error(f"Помилка тестування Stability AI API: {e}")
         await update.message.reply_text(f"❌ Помилка Stability AI API: {e}")
 async def test_message_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if update.effective_user.id not in admin_ids: return ConversationHandler.END # Перевірка прав доступу
+    if update.effective_user.id not in ADMIN_IDS: return ConversationHandler.END # Перевірка прав доступу
 
     keyboard = [
         [InlineKeyboardButton("Використати мої дані (тест)", callback_data="test_user_default")],
@@ -2288,8 +2107,7 @@ async def test_message_command(update: Update, context: ContextTypes.DEFAULT_TYP
 async def handle_test_user_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     if not query: return ConversationHandler.END
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-    if query.from_user.id not in admin_ids: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
     choice = query.data
 
@@ -2352,9 +2170,7 @@ async def receive_test_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     f"**Від:** {user_info['name']} (ID: {user_info['id']})\n\n"
                     f"**Текст:**\n---\n{user_message}")
 
-    admin_ids = list(context.application.bot_data.get('admin_ids', []))
-
-    for admin_id in admin_ids:
+    for admin_id in ADMIN_IDS:
         try:
             if media_type == 'photo':
                 await context.bot.send_photo(chat_id=admin_id, photo=file_id, caption=forward_text, reply_markup=reply_markup, parse_mode='Markdown')
@@ -2436,14 +2252,9 @@ async def main() -> None:
 
     # --- Налаштування даних бота та обробників ---
     
-    # === НОВИЙ ФІКС: Завантаження даних адміністраторів при запуску ===
-    # Запускаємо міграцію, якщо потрібно
-    admin_ids, admin_contacts = load_admin_data(migrate_if_empty=True) 
-    application.bot_data['admin_ids'] = admin_ids # Використовується для перевірки прав
-    application.bot_data['admin_contacts'] = admin_contacts # Використовується для get_admin_name
-    
     # Завантаження початкових даних (викликає синхронізацію з Sheets, якщо локальний кеш порожній)
     application.bot_data['kb_data'] = load_data(KNOWLEDGE_BASE_FILE)
+    application.bot_data['admin_contacts'] = load_data('admin_contacts.json')
     
     # Завантаження ID користувачів
     user_data = load_data(USER_IDS_FILE)
@@ -2579,17 +2390,14 @@ async def main() -> None:
     application.add_handler(CommandHandler("testai", test_ai_command))
     application.add_handler(CommandHandler("testimage", test_image_command))
     
-    # Використовуємо application.bot_data['admin_ids'] для перевірки
-    admin_ids_filter = filters.User(admin_ids) if admin_ids else filters.User([99999999999]) # Фільтр для запобігання збоям, якщо немає адмінів
-    
-    application.add_handler(MessageHandler(filters.REPLY & admin_ids_filter, handle_admin_direct_reply))
+    application.add_handler(MessageHandler(filters.REPLY & filters.User(ADMIN_IDS), handle_admin_direct_reply))
     application.add_handler(CallbackQueryHandler(admin_stats_handler, pattern='^admin_stats$'))
     application.add_handler(CallbackQueryHandler(website_update_handler, pattern='^(broadcast_website|cancel_website_update):.*$'))
     application.add_handler(CallbackQueryHandler(generate_post_from_site, pattern='^admin_generate_post$'))
-    application.add_handler(CallbackQueryHandler(handle_post_broadcast_confirmation, pattern='^(confirm_post|cancel_post):.*$')) 
+    application.add_handler(CallbackQueryHandler(handle_post_broadcast_confirmation, pattern='^(confirm_post|cancel_post):.*$'))
     application.add_handler(CallbackQueryHandler(view_kb, pattern='^admin_kb_view$'))
     application.add_handler(CallbackQueryHandler(delete_kb_entry, pattern=r'^kb_delete:.*$'))
-    application.add_handler(CallbackQueryHandler(toggle_kb_faq_status, pattern=r'^kb_faq_toggle:.*$')) 
+    application.add_handler(CallbackQueryHandler(toggle_kb_faq_status, pattern=r'^kb_faq_toggle:.*$')) # НОВИЙ ХЕНДЛЕР ДЛЯ FAQ КНОПКИ
     application.add_handler(CallbackQueryHandler(faq_button_handler, pattern='^faq_key:'))
     application.add_handler(CallbackQueryHandler(view_scheduled_posts, pattern='^admin_view_scheduled$'))
     application.add_handler(CallbackQueryHandler(cancel_scheduled_job_button, pattern='^cancel_job:'))
