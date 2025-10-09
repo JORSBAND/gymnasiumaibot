@@ -39,9 +39,21 @@ RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://gymnasiumai
 WEBHOOK_PATH = f"/{TELEGRAM_BOT_TOKEN}"
 WEBHOOK_URL = RENDER_EXTERNAL_URL.rstrip('/') + WEBHOOK_PATH
 
-# !!! ЛОКАЛЬНІ КОНСТАНТИ ВИДАЛЕНО, АДМІНИ ЗАВАНТАЖУЮТЬСЯ З SHEETS !!!
-# ADMIN_IDS = [...] ВИДАЛЕНО
-# ADMIN_CONTACTS_FILE = 'admin_contacts.json' ВИДАЛЕНО
+# --- ЛОКАЛЬНІ ДАНІ ДЛЯ МІГРАЦІЇ (ВИДАЛИТИ ПІСЛЯ УСПІШНОЇ МІГРАЦІЇ) ---
+# Ці дані використовуються тільки для першого заповнення листа "Адміністратори"
+INITIAL_ADMIN_IDS = [
+    838464083, # Example Admin 1
+    6484405296, # Example Admin 2
+    1374181841, # Example Admin 3
+    5268287971, # Example Admin 4
+]
+INITIAL_ADMIN_CONTACTS = {
+    838464083: "Ярослав",
+    6484405296: "Оксана",
+    1374181841: "Андрій",
+    5268287971: "Тетяна",
+}
+# ----------------------------------------------------------------------
 
 GYMNASIUM_URL = "https://brodygymnasium.e-schools.info"
 TARGET_CHANNEL_ID = -1002946740131
@@ -89,12 +101,42 @@ GSHEET_SCOPE = [
     'https://www.googleapis.com/auth/drive'
 ]
 
+# НОВА ФУНКЦІЯ: Збереження даних адміністраторів (для міграції)
+def save_admin_data_to_gsheet(admin_data: list[dict]) -> bool:
+    """Зберігає список адміністраторів у Google Sheets (лист Адміністратори)."""
+    worksheet = get_gsheet_client(ADMIN_GSHEET_WORKSHEET_NAME)
+    if not worksheet:
+        logger.error("Не вдалося отримати клієнт Google Sheets для збереження адміністраторів.")
+        return False
+    
+    try:
+        # Форматуємо дані: [["ID", "Ім'я", "Активний"], ...]
+        records = [['ID', 'Ім\'я', 'Активний']] 
+        
+        for user in admin_data:
+            # Використовуємо "+" для активних
+            status = '+' if user.get('is_active') else '-' 
+            records.append([
+                user.get('id', ''),
+                user.get('name', 'N/A'),
+                status
+            ])
+        
+        # Очищуємо весь лист і завантажуємо нові дані
+        worksheet.batch_clear(["A1:C1000"])
+        worksheet.update('A1', records)
+        logger.info(f"✅ Успішно збережено {len(admin_data)} записів адміністраторів у Google Sheets.")
+        return True
+    except Exception as e:
+        logger.error(f"Помилка запису адміністраторів в Google Sheets: {e}")
+        return False
+
 # НОВА ФУНКЦІЯ: Завантаження даних адміністраторів
-def load_admin_data() -> tuple[list[int], dict[int, str]]:
+def load_admin_data(migrate_if_empty: bool = False) -> tuple[list[int], dict[int, str]]:
     """Завантажує ID адміністраторів та їхні імена з Google Sheets."""
     worksheet = get_gsheet_client(ADMIN_GSHEET_WORKSHEET_NAME)
     if not worksheet:
-        logger.error("Не вдалося завантажити дані адміністраторів. Використовується порожній список.")
+        logger.error("Не вдалося отримати клієнт для листа адміністраторів.")
         return [], {}
     
     admin_ids = []
@@ -102,6 +144,29 @@ def load_admin_data() -> tuple[list[int], dict[int, str]]:
     
     try:
         list_of_lists = worksheet.get_all_values()
+        
+        # --- ЛОГІКА МІГРАЦІЇ ---
+        if migrate_if_empty and (not list_of_lists or (len(list_of_lists) == 1 and not list_of_lists[0][0])):
+            logger.warning("Лист адміністраторів порожній. Запускаю міграцію з локальних констант.")
+            
+            admin_records = []
+            for user_id in INITIAL_ADMIN_IDS:
+                name = INITIAL_ADMIN_CONTACTS.get(user_id, f"Адмін {user_id}")
+                admin_records.append({
+                    'id': user_id, 
+                    'name': name, 
+                    'is_active': True
+                }) 
+            
+            # Зберігаємо мігровані дані в Sheets (синхронний запис)
+            if admin_records:
+                save_admin_data_to_gsheet(admin_records)
+                logger.info(f"Міграція завершена. Перезавантажую дані.")
+                # Отримуємо дані ще раз після запису
+                list_of_lists = get_gsheet_client(ADMIN_GSHEET_WORKSHEET_NAME).get_all_values() if get_gsheet_client(ADMIN_GSHEET_WORKSHEET_NAME) else []
+
+        # --- КІНЕЦЬ ЛОГІКИ МІГРАЦІЇ ---
+
         if not list_of_lists or len(list_of_lists) < 2:
             return [], {}
         
@@ -119,7 +184,11 @@ def load_admin_data() -> tuple[list[int], dict[int, str]]:
         for row in list_of_lists[1:]:
             try:
                 user_id = int(row[id_idx].strip())
-                is_active = row[active_idx].strip().lower() in ['x', 'true'] if active_idx >= 0 and len(row) > active_idx else False
+                
+                # Перевіряємо активність: '+' або 'x' або 'true'
+                active_status = row[active_idx].strip().lower() if active_idx >= 0 and len(row) > active_idx else ''
+                is_active = active_status in ['x', 'true', '+']
+                
                 name = row[name_idx].strip() if name_idx >= 0 and len(row) > name_idx else f"Адмін {user_id}"
 
                 if is_active:
@@ -163,6 +232,27 @@ def get_gsheet_client(worksheet_name: str):
     except Exception as e:
         logger.error(f"Помилка ініціалізації GSheet Client (лист: {worksheet_name}): {e}")
         return None
+
+# ВИПРАВЛЕНО: Функція get_admin_name тепер використовує глобальний словник контактів
+def get_admin_name(admin_id: int) -> str:
+    """Повертає ім'я адміністратора за ID з кешованих даних."""
+    # admin_contacts зберігається у application.bot_data['admin_contacts']
+    # Але викликається поза контекстом, тому шукаємо його в глобальних даних (якщо ініціалізовано)
+    # Оскільки ця функція часто викликається з logger.error або notify_other_admins,
+    # безпечніше передавати context, але для сумісності з попереднім кодом:
+    
+    # ПРИМІТКА: Для коректної роботи ця функція має бути викликана ПІСЛЯ application.bot_data заповнено.
+    # Для цього ми використовуємо її тільки в контекстних обробниках.
+    
+    # Запускаємо впевнено, що application.bot_data вже існує після main()
+    try:
+        app = Application.get_instance()
+        admin_contacts = app.bot_data.get('admin_contacts', {})
+        return admin_contacts.get(admin_id, f"Адміністратор {admin_id}")
+    except Exception:
+        # У разі виклику поза контекстом (що рідко, але буває), використовуємо заглушку
+        return f"Адміністратор {admin_id}"
+
 
 def save_data_to_gsheet(kb_data: Dict[str, dict]) -> bool:
     """Зберігає поточну базу знань у Google Sheets."""
@@ -388,8 +478,6 @@ def update_user_list(user_id: int, username: str | None, first_name: str | None,
     
     full_name = ' '.join(filter(None, [first_name, last_name]))
     
-    # Виправляємо проблему: якщо load_data повернув старий формат [1, 2, 3...], 
-    # він буде мігрувати його в main(), але тут він може знову прочитати старий кеш.
     # Ми перевіряємо, чи елемент є словником, перш ніж викликати .get()
     
     found = False
@@ -2349,7 +2437,8 @@ async def main() -> None:
     # --- Налаштування даних бота та обробників ---
     
     # === НОВИЙ ФІКС: Завантаження даних адміністраторів при запуску ===
-    admin_ids, admin_contacts = load_admin_data()
+    # Запускаємо міграцію, якщо потрібно
+    admin_ids, admin_contacts = load_admin_data(migrate_if_empty=True) 
     application.bot_data['admin_ids'] = admin_ids # Використовується для перевірки прав
     application.bot_data['admin_contacts'] = admin_contacts # Використовується для get_admin_name
     
@@ -2490,7 +2579,10 @@ async def main() -> None:
     application.add_handler(CommandHandler("testai", test_ai_command))
     application.add_handler(CommandHandler("testimage", test_image_command))
     
-    application.add_handler(MessageHandler(filters.REPLY & filters.User(admin_ids), handle_admin_direct_reply))
+    # Використовуємо application.bot_data['admin_ids'] для перевірки
+    admin_ids_filter = filters.User(admin_ids) if admin_ids else filters.User([99999999999]) # Фільтр для запобігання збоям, якщо немає адмінів
+    
+    application.add_handler(MessageHandler(filters.REPLY & admin_ids_filter, handle_admin_direct_reply))
     application.add_handler(CallbackQueryHandler(admin_stats_handler, pattern='^admin_stats$'))
     application.add_handler(CallbackQueryHandler(website_update_handler, pattern='^(broadcast_website|cancel_website_update):.*$'))
     application.add_handler(CallbackQueryHandler(generate_post_from_site, pattern='^admin_generate_post$'))
