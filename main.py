@@ -519,7 +519,7 @@ async def check_website_for_updates(context: ContextTypes.DEFAULT_TYPE):
         logger.info("Не вдалося отримати текст з сайту.")
         return
 
-    last_check_data = load_data('website_content.json') or {}
+    last_check_data = load_data('website_content.json', {})
     previous_text = last_check_data.get('text', '')
 
     if new_text != previous_text:
@@ -848,9 +848,9 @@ async def scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         photo=job_data.get('photo'),
         video=job_data.get('video')
     )
-    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
+    scheduled_posts = load_data('scheduled_posts.json', [])
     updated_posts = [p for p in scheduled_posts if p.get('id') != context.job.name]
-    save_data(updated_posts, SCHEDULED_POSTS_FILE)
+    save_data(updated_posts, 'scheduled_posts.json')
 
 def remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
     current_jobs = context.job_queue.get_jobs_by_name(name)
@@ -939,9 +939,9 @@ async def confirm_schedule_post(update: Update, context: ContextTypes.DEFAULT_TY
 
     job_id = f"scheduled_post_{uuid.uuid4().hex[:10]}"
     
-    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
+    scheduled_posts = load_data('scheduled_posts.json', [])
     scheduled_posts.append({'id': job_id, 'text': post_data['text'], 'time': schedule_time.isoformat()})
-    save_data(scheduled_posts, SCHEDULED_POSTS_FILE)
+    save_data(scheduled_posts, 'scheduled_posts.json')
 
     context.job_queue.run_once(scheduled_broadcast_job, when=schedule_time, data=post_data, name=job_id)
 
@@ -963,7 +963,7 @@ async def view_scheduled_posts(update: Update, context: ContextTypes.DEFAULT_TYP
     if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
     
-    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
+    scheduled_posts = load_data('scheduled_posts.json', [])
     
     if not scheduled_posts:
         await query.edit_message_text("Немає запланованих постів.")
@@ -997,9 +997,9 @@ async def cancel_scheduled_job_button(update: Update, context: ContextTypes.DEFA
     
     job_name = query.data.split(':', 1)[1]
     
-    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
+    scheduled_posts = load_data('scheduled_posts.json', [])
     updated_list = [p for p in scheduled_posts if p['id'] != job_name]
-    save_data(updated_list, SCHEDULED_POSTS_FILE)
+    save_data(updated_list, 'scheduled_posts.json')
 
     if remove_job_if_exists(job_name, context):
         await query.edit_message_text("✅ Заплановану розсилку скасовано.")
@@ -1179,11 +1179,11 @@ async def start_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text = message.text or message.caption or ""
     
     # 1. Збереження повідомлення в історію
-    conversations = load_data(CONVERSATIONS_FILE, {})
+    conversations = load_data('conversations.json', {})
     user_id_str = str(user_id)
     if user_id_str not in conversations: conversations[user_id_str] = []
     conversations[user_id_str].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
-    save_data(conversations, CONVERSATIONS_FILE)
+    save_data(conversations, 'conversations.json')
 
     # 2. Визначаємо, чи є медіа-вміст. Якщо так, пропускаємо ШІ і йдемо прямо до адмінів.
     has_media = message.photo or message.video
@@ -1278,11 +1278,11 @@ async def continue_conversation(update: Update, context: ContextTypes.DEFAULT_TY
     # Збереження доповнення в історію
     user_id = update.effective_user.id
     text = update.message.text or update.message.caption or ""
-    conversations = load_data(CONVERSATIONS_FILE, {})
+    conversations = load_data('conversations.json', {})
     user_id_str = str(user_id)
     if user_id_str not in conversations: conversations[user_id_str] = []
     conversations[user_id_str].append({"sender": "user", "text": text, "timestamp": datetime.now().isoformat()})
-    save_data(conversations, CONVERSATIONS_FILE)
+    save_data(conversations, 'conversations.json')
 
 
     keyboard = [
@@ -1324,10 +1324,10 @@ async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAUL
     
     # 1. Збереження повідомлення в історію
     user_id_str = str(user_id)
-    conversations = load_data(CONVERSATIONS_FILE, {})
+    conversations = load_data('conversations.json', {})
     if user_id_str not in conversations: conversations[user_id_str] = []
     conversations[user_id_str].append({"sender": "user", "text": f"(Анонімно) {message_text}", "timestamp": datetime.now().isoformat()})
-    save_data(conversations, CONVERSATIONS_FILE)
+    save_data(conversations, 'conversations.json')
 
     # 2. Спроба авто-відповіді ШІ
     ai_response = await try_ai_autoreply(message_text)
@@ -1509,7 +1509,7 @@ async def send_ai_reply_to_user(update: Update, context: ContextTypes.DEFAULT_TY
         target_user_id_typed = int(target_user_id)
         await send_telegram_reply(context.application, target_user_id_typed, ai_response_text)
         
-        # ВИПРАВЛЕНО: Редагуємо повідомлення, щоб позначити, що на нього відповіли
+        # ВИПРАВЛЕНО: Редагуємо повідомлення, щоб позначити, що на його відповіли
         original_text = query.message.text.split("\n\n🤖 **Ось відповідь від ШІ:**")[0]
         final_text = f"{original_text}\n\n✅ **ВІДПОВІДЬ НАДІСЛАНА (ШІ).**"
         
@@ -2058,11 +2058,26 @@ async def main() -> None:
     
     # Завантаження початкових даних (викликає синхронізацію з Sheets, якщо локальний кеш порожній)
     application.bot_data['kb_data'] = load_data(KNOWLEDGE_BASE_FILE)
-    application.bot_data['admin_contacts'] = load_data(ADMIN_CONTACTS_FILE)
+    application.bot_data['admin_contacts'] = load_data('admin_contacts.json')
     
     # Завантаження ID користувачів
     user_data = load_data(USER_IDS_FILE)
-    application.bot_data['user_ids'] = {user['id'] for user in user_data if 'id' in user}
+    
+    # === ФІКС ПОМИЛКИ: САНІТИЗАЦІЯ ДАНИХ КОРИСТУВАЧІВ (Migration) ===
+    sanitized_user_data = []
+    for item in user_data:
+        if isinstance(item, dict) and 'id' in item:
+            # Новий, правильний формат (словник)
+            sanitized_user_data.append(item)
+        elif isinstance(item, int):
+            # Старий, простий формат (ціле число). Конвертуємо у словник.
+            sanitized_user_data.append({'id': item, 'full_name': 'Migrated User', 'username': None, 'last_run': 'N/A (Migrated)'})
+        # Інакше ігноруємо невідомий або пошкоджений елемент
+            
+    # Тепер створюємо множину з санітизованих даних
+    application.bot_data['user_ids'] = {user['id'] for user in sanitized_user_data if 'id' in user}
+    # ===============================================================
+    
     application.bot_data['anonymous_map'] = {}
     logger.info(f"Завантажено {len(application.bot_data['user_ids'])} унікальних ID користувачів.")
 
