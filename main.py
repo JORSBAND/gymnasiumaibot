@@ -3,7 +3,7 @@ import asyncio
 import uuid
 import json
 import logging
-import time # Додано для експоненційного відступу
+# import time # ВИДАЛЕНО, використовуємо asyncio.sleep
 from datetime import datetime, time as dt_time
 import google.generativeai as genai
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ReplyKeyboardRemove
@@ -75,7 +75,7 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 logger = logging.getLogger(__name__)
 
 # --- СТАНИ ДЛЯ CONVERSATIONHANDLER (ПОВНИЙ СПИСОК) ---
-# Цей блок повинен бути перед усіма хендлерами, що його використовують
+# ВИПРАВЛЕНО: Видалено зайву ** перед WAITING_FOR_ADMIN_MESSAGE
 (SELECTING_CATEGORY, IN_CONVERSATION, WAITING_FOR_REPLY,
  WAITING_FOR_ANONYMOUS_MESSAGE, WAITING_FOR_ANONYMOUS_REPLY,
  WAITING_FOR_BROADCAST_MESSAGE, CONFIRMING_BROADCAST,
@@ -84,7 +84,7 @@ logger = logging.getLogger(__name__)
  SELECTING_TEST_USER, WAITING_FOR_TEST_NAME, WAITING_FOR_TEST_ID,
  WAITING_FOR_TEST_MESSAGE, WAITING_FOR_KB_EDIT_VALUE,
  WAITING_FOR_SCHEDULE_TEXT, WAITING_FOR_SCHEDULE_TIME, CONFIRMING_SCHEDULE_POST,
- **WAITING_FOR_ADMIN_MESSAGE**) = range(22) # Змінено range на 22
+ WAITING_FOR_ADMIN_MESSAGE) = range(22) 
 # --- GOOGLE SHEETS УТИЛІТИ ---
 
 GSHEET_SCOPE = [
@@ -1519,8 +1519,8 @@ async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAUL
     message_text = update.message.text
     
     # 1. Збереження повідомлення в історію
-    user_id_str = str(user_id)
     conversations = load_data('conversations.json', {})
+    user_id_str = str(user_id)
     if user_id_str not in conversations: conversations[user_id_str] = []
     conversations[user_id_str].append({"sender": "user", "text": f"(Анонімно) {message_text}", "timestamp": datetime.now().isoformat()})
     save_data(conversations, 'conversations.json')
@@ -2394,7 +2394,7 @@ async def main() -> None:
     application.add_handler(CallbackQueryHandler(admin_stats_handler, pattern='^admin_stats$'))
     application.add_handler(CallbackQueryHandler(website_update_handler, pattern='^(broadcast_website|cancel_website_update):.*$'))
     application.add_handler(CallbackQueryHandler(generate_post_from_site, pattern='^admin_generate_post$'))
-    application.add_handler(CallbackQueryHandler(handle_post_broadcast_confirmation, pattern='^(confirm_post|cancel_post):.*$'))
+    application.add_handler(CallbackHandler(handle_post_broadcast_confirmation, pattern='^(confirm_post|cancel_post):.*$'))
     application.add_handler(CallbackQueryHandler(view_kb, pattern='^admin_kb_view$'))
     application.add_handler(CallbackQueryHandler(delete_kb_entry, pattern=r'^kb_delete:.*$'))
     application.add_handler(CallbackQueryHandler(toggle_kb_faq_status, pattern=r'^kb_faq_toggle:.*$')) # НОВИЙ ХЕНДЛЕР ДЛЯ FAQ КНОПКИ
