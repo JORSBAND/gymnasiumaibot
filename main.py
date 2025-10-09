@@ -27,7 +27,7 @@ from aiohttp import web
 # !!! ВАЖЛИВО: Замініть "YOUR_NEW_TELEGRAM_BOT_TOKEN_HERE" на ваш дійсний токен Telegram !!!
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8223675237:AAF_kmo6SP4XZS23NeXWFxgkQNUaEZOWNx0")
 # !!! КРИТИЧНО: Переконайтеся, що всі ключі Gemini дійсні та мають активний баланс! !!!
-GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEcX6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyA6op6ah5PD5U_mICb_QXY_IH-3RGVEwEs")
+GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEc6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyA6op6ah5PD5U_mICb_QXY_IH-3RGVEwEs")
 GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.strip()]
 CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c9612fc52ccb303667c92687")
 # !!! КРИТИЧНО: Токен Cloudflare не працює (401). Перевірте токен Cloudflare! !!!
@@ -62,6 +62,12 @@ GSHEET_WORKSHEET_NAME = os.environ.get("GSHEET_WORKSHEET_NAME", "База_Зна
 USERS_GSHEET_WORKSHEET_NAME = os.environ.get("USERS_GSHEET_WORKSHEET_NAME", "Користувачі")
 # JSON-ключі сервісного облікового запису (як змінна оточення)
 GCP_CREDENTIALS_JSON = os.environ.get("GCP_CREDENTIALS_JSON", "{}") 
+
+# --- КЛЮЧІ ДЛЯ БАЗИ ЗНАНЬ ---
+KB_KEY_QUESTION = "Питання"
+KB_KEY_ANSWER = "Відповідь"
+# НОВИЙ КЛЮЧ: Використовується для позначення запису як FAQ (будь-яке значення, окрім пустого)
+KB_KEY_IS_FAQ = "FAQ" 
 # --- Кінець налаштувань ---
 
 # Логування
@@ -114,7 +120,7 @@ def get_gsheet_client(worksheet_name: str):
         logger.error(f"Помилка ініціалізації GSheet Client (лист: {worksheet_name}): {e}")
         return None
 
-def save_data_to_gsheet(kb_data: Dict[str, str]) -> bool:
+def save_data_to_gsheet(kb_data: Dict[str, dict]) -> bool:
     """Зберігає поточну базу знань у Google Sheets."""
     worksheet = get_gsheet_client(GSHEET_WORKSHEET_NAME)
     if not worksheet:
@@ -122,9 +128,15 @@ def save_data_to_gsheet(kb_data: Dict[str, str]) -> bool:
         return False
     
     try:
-        # Перетворюємо словник у список списків [["Питання", "Відповідь"], ...]
-        records = [["Питання", "Відповідь"]] # Заголовок
-        records.extend([[k, v] for k, v in kb_data.items()])
+        # Перетворюємо словник у список списків [[KB_KEY_QUESTION, KB_KEY_ANSWER, KB_KEY_IS_FAQ], ...]
+        records = [[KB_KEY_QUESTION, KB_KEY_ANSWER, KB_KEY_IS_FAQ]] # Заголовок
+        
+        for key, data in kb_data.items():
+            records.append([
+                key,
+                data.get(KB_KEY_ANSWER, ''),
+                data.get(KB_KEY_IS_FAQ, '')
+            ])
         
         # Очищуємо весь лист і завантажуємо нові дані
         worksheet.batch_clear(["A1:Z1000"]) 
@@ -162,8 +174,12 @@ def save_users_to_gsheet(users: list[dict]) -> bool:
         logger.error(f"Помилка запису користувачів в Google Sheets: {e}")
         return False
 
-def fetch_kb_from_sheets() -> Dict[str, str] | None:
-    """Завантажує базу знань із Google Sheets."""
+def fetch_kb_from_sheets() -> Dict[str, dict] | None:
+    """
+    Завантажує базу знань із Google Sheets. 
+    Очікує: [Питання, Відповідь, FAQ]
+    Повертає: {'Питання': {'Відповідь': 'текст', 'FAQ': 'значення'}, ...}
+    """
     worksheet = get_gsheet_client(GSHEET_WORKSHEET_NAME)
     if not worksheet:
         return None 
@@ -175,11 +191,24 @@ def fetch_kb_from_sheets() -> Dict[str, str] | None:
             logger.warning("Google Sheets (KB) порожній або містить лише заголовок.")
             return {}
 
+        # Ідентифікуємо індекси стовпців за заголовками
+        header = [h.strip() for h in list_of_lists[0]]
+        q_idx = header.index(KB_KEY_QUESTION) if KB_KEY_QUESTION in header else 0
+        a_idx = header.index(KB_KEY_ANSWER) if KB_KEY_ANSWER in header else 1
+        faq_idx = header.index(KB_KEY_IS_FAQ) if KB_KEY_IS_FAQ in header else -1 # -1, якщо FAQ стовпця немає
+        
         data_rows = list_of_lists[1:]
         kb = {}
         for row in data_rows:
-            if len(row) >= 2 and row[0].strip():
-                kb[row[0].strip()] = row[1].strip() if len(row) > 1 else ""
+            if len(row) > q_idx and row[q_idx].strip():
+                question = row[q_idx].strip()
+                answer = row[a_idx].strip() if len(row) > a_idx else ""
+                is_faq = row[faq_idx].strip() if faq_idx >= 0 and len(row) > faq_idx else ""
+                
+                kb[question] = {
+                    KB_KEY_ANSWER: answer,
+                    KB_KEY_IS_FAQ: is_faq
+                }
         
         logger.info(f"✅ Успішно завантажено {len(kb)} записів із Google Sheets (KB).")
         return kb
@@ -190,23 +219,23 @@ def fetch_kb_from_sheets() -> Dict[str, str] | None:
 # --- КІНЕЦЬ GOOGLE SHEETS УТИЛІТ ---
 
 # --- Функція для отримання початкових даних бази знань (резерв) ---
-def get_default_knowledge_base() -> Dict[str, str]:
+def get_default_knowledge_base() -> Dict[str, dict]:
     """Повертає початковий вміст бази знань у форматі 'ключ: значення'."""
     return {
-        "Хто є директор школи?": "Директор школи: Кіт Ярослав Ярославович. Телефон: +380976929979",
-        "Контактні дані школи": (
+        "Хто є директор школи?": {KB_KEY_ANSWER: "Директор школи: Кіт Ярослав Ярославович. Телефон: +380976929979", KB_KEY_IS_FAQ: "x"},
+        "Контактні дані школи": {KB_KEY_ANSWER: (
             "Офіційне найменування: Бродівська гімназія імені Івана Труша Бродівської міської ради Львівської області. "
             "Тип: Установа загальної середньої освіти. "
             "Адреса: 80600, м. Броди, вул. Коцюбинського, 2. "
             "Телефон директора: +3803266 27991. E-mail: brodyg@ukr.net"
-        ),
-        "Хто є адміністратором?": "Вам відповідає Штучний Інтелект. Наразі адміністратор, який модерує цього бота, не оголошений.",
-        "Розклад уроків": "Інформація коригується. На жаль, наразі не можемо надати розклад уроків, оскільки він не є сталим і ще коригується. Як тільки буде затверджено стабільний розклад, ми зможемо його надіслати.",
-        "Хто є в складі адміністрації школи?": (
+        ), KB_KEY_IS_FAQ: ""},
+        "Хто є адміністратором?": {KB_KEY_ANSWER: "Вам відповідає Штучний Інтелект. Наразі адміністратор, який модерує цього бота, не оголошений.", KB_KEY_IS_FAQ: "x"},
+        "Розклад уроків": {KB_KEY_ANSWER: "Інформація коригується. На жаль, наразі не можемо надати розклад уроків, оскільки він не є сталим і ще коригується. Як тільки буде затверджено стабільний розклад, ми зможемо його надіслати.", KB_KEY_IS_FAQ: ""},
+        "Хто є в складі адміністрації школи?": {KB_KEY_ANSWER: (
             "Адміністрація: Директор: Кіт Ярослав Ярославович. "
             "Заступники директора (завучі): Губач Оксана Богданівна, Демидчук Оксана Андріївна, Янчук Галина Ярославівна."
-        ),
-        "Вчителі (повний список за предметами)": (
+        ), KB_KEY_IS_FAQ: ""},
+        "Вчителі (повний список за предметами)": {KB_KEY_ANSWER: (
             "Інформатика: Крутяк Назарій Олегович, Янчук Роман Володимирович. "
             "Фізична культура та Захист Вітчизни: Кіт Ярослав Ярославович, Рак Мар'ян Володимирович. "
             "Фізика: Данчук Валентина Володимирівна, Мартинюк Ігор Степанович. "
@@ -219,16 +248,16 @@ def get_default_knowledge_base() -> Dict[str, str]:
             "Історія: Авдєєнко Тетяна Петрівна, Дискант Марія Петрівна, Корчак Андрій Михайлович, Мельник Тарас Юрійович. "
             "Суспільний цикл: Кашуба Ірина Данилівна, Климко Валентина Володимирівна, Козіцька Тетяна Володимирівна, Корольчук Ірина Іванівна, Корчак Оксана Євгенівна. "
             "Біологія та географія: Білостоцька Ірина Богданівна, Демчинська Галина Орестівна, Неверенчук Марія Іванівна, Підгурська Ірина Богданівна."
-        ),
-        "Що зроблено у гімназії (проєкти)?": (
+        ), KB_KEY_IS_FAQ: ""},
+        "Що зроблено у гімназії (проєкти)?": {KB_KEY_ANSWER: (
             "1997-2007: Програма вивчення німецької мови (OeAD). 2001-2005: IREX/IATP «Віртуальний центр з громадянської освіти». "
             "2003-2015: Пілотна школа програми «Школа як осередок розвитку громади» («Крок за кроком»). 2003: Проєкт \"Інтернет для сільських шкіл\" (посольство Канади). "
             "2004-2006: «Ми є одна громада» (програма малих грантів). 2005 - сьогодення: Обмінні проєкти з польськими школами-партнерами. "
             "2017-2021: Обмінні проекти зі школою м. Зіген. 2019-2021: Учасник проєкту «Ми будуємо спільноту...» (RITA). "
             "2017-2021: Спільні проєкти з Білокуракинським ліцеєм №1 («Змінимо країну разом»). 2021: Пілотна школа проєкту «SELFIE». "
             "2021: Учасники проєкту 'MOODLE – це про100'. 2021: Виконавець проєкту 'Ватра-фест - 2021'."
-        ),
-        "Важливі посилання": "Telegram-канал: https://t.me/+2NB0puCLx6o5NDk6. Офіційний сайт: https://brodygymnasium.e-schools.info/"
+        ), KB_KEY_IS_FAQ: ""},
+        "Важливі посилання": {KB_KEY_ANSWER: "Telegram-канал: https://t.me/+2NB0puCLx6o5NDk6. Офіційний сайт: https://brodygymnasium.e-schools.info/", KB_KEY_IS_FAQ: "x"}
     }
 
 # --- Утиліти для збереження/зчитування JSON ---
@@ -474,10 +503,15 @@ async def gather_all_context(query: str) -> str:
     site_text, teachers_info = await asyncio.gather(site_text_task, teachers_info_task)
 
     kb = load_data(KNOWLEDGE_BASE_FILE) or {}
-    relevant_kb = {}
+    relevant_kb_simple = {}
     if isinstance(kb, dict):
         qwords = set(query.lower().split())
-        relevant_kb = {k: v for k, v in kb.items() if qwords & set(str(k).lower().split())}
+        for q_key, data in kb.items():
+            # Використовуємо тільки ключ і відповідь для пошуку
+            full_text = f"{q_key} {data.get(KB_KEY_ANSWER, '')}".lower()
+            if qwords & set(full_text.split()):
+                relevant_kb_simple[q_key] = data.get(KB_KEY_ANSWER, '(Відповідь відсутня)')
+        
 
     context_parts = []
     if teachers_info:
@@ -488,8 +522,9 @@ async def gather_all_context(query: str) -> str:
     else:
         context_parts.append("**Контекст з сайту:**\nНе вдалося отримати.")
 
-    if relevant_kb:
-        context_parts.append(f"**Контекст з бази даних:**\n{json.dumps(relevant_kb, ensure_ascii=False)}")
+    if relevant_kb_simple:
+        # Для передачі ШІ перетворюємо в простий формат ключ: відповідь
+        context_parts.append(f"**Контекст з бази даних:**\n{json.dumps(relevant_kb_simple, ensure_ascii=False)}")
     else:
         context_parts.append("**Контекст з бази даних:**\nНічого релевантного не знайдено.")
 
@@ -697,7 +732,13 @@ async def get_kb_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         
     kb = load_data(KNOWLEDGE_BASE_FILE) or {}
     if not isinstance(kb, dict): kb = {}
-    kb[key] = value
+    
+    # Створюємо новий запис у форматі словника з KB_KEY_ANSWER та KB_KEY_IS_FAQ (за замовчуванням порожній)
+    kb[key] = {
+        KB_KEY_ANSWER: value,
+        KB_KEY_IS_FAQ: "" 
+    }
+    
     save_data(kb, KNOWLEDGE_BASE_FILE) # Зберігає локально і синхронізує з Sheets
     
     await update.message.reply_text(f"✅ Дані успішно збережено та синхронізовано з Google Sheets!\n\n**{key}**: {value}", parse_mode='Markdown')
@@ -721,17 +762,28 @@ async def view_kb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.bot_data['kb_key_map'] = {}
     context.bot_data['kb_key_map'].clear()
 
-    for key, value in kb.items():
+    for key, data in kb.items():
         key_hash = hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]
         context.bot_data['kb_key_map'][key_hash] = key
+        
+        is_faq = bool(data.get(KB_KEY_IS_FAQ, ''))
+        
+        faq_button_text = "Видалити з FAQ ❌" if is_faq else "Додати в FAQ ✨"
+        faq_callback = f"kb_faq_toggle:{key_hash}"
+        faq_status_mark = "✨ (FAQ)" if is_faq else "(Звичайна KB)"
 
         keyboard = [
             [
                 InlineKeyboardButton("Редагувати ✏️", callback_data=f"kb_edit:{key_hash}"),
                 InlineKeyboardButton("Видалити 🗑️", callback_data=f"kb_delete:{key_hash}")
+            ],
+            [
+                InlineKeyboardButton(faq_button_text, callback_data=faq_callback)
             ]
         ]
-        text = f"**Ключ:** `{key}`\n\n**Значення:**\n`{value}`"
+        answer = data.get(KB_KEY_ANSWER, "--- Відповідь відсутня ---")
+        
+        text = f"**Ключ:** `{key}` {faq_status_mark}\n\n**Значення:**\n`{answer}`"
         
         if len(text) > 4000:
             text = text[:4000] + "..."
@@ -742,7 +794,61 @@ async def view_kb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parse_mode='Markdown'
         )
         await asyncio.sleep(0.1)
-        
+
+async def toggle_kb_faq_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query: return
+    if query.from_user.id not in ADMIN_IDS: return
+    await query.answer()
+
+    key_hash = query.data.split(':', 1)[1]
+    key_to_edit = context.bot_data.get('kb_key_map', {}).get(key_hash)
+
+    if not key_to_edit:
+        await query.edit_message_text("❌ Помилка: цей запис застарів.")
+        return
+
+    kb = load_data(KNOWLEDGE_BASE_FILE) or {}
+    data = kb.get(key_to_edit)
+    
+    if not data:
+        await query.edit_message_text(f"❌ Помилка: запис з ключем `{key_to_edit}` не знайдено.")
+        return
+
+    is_faq = bool(data.get(KB_KEY_IS_FAQ, ''))
+    
+    # Змінюємо статус: якщо було FAQ (x), робимо порожнім, і навпаки
+    new_faq_status = "" if is_faq else "x"
+    data[KB_KEY_IS_FAQ] = new_faq_status
+    kb[key_to_edit] = data
+    
+    save_data(kb, KNOWLEDGE_BASE_FILE) # Зберігає локально і синхронізує з Sheets
+    
+    # Оновлюємо кнопки та текст повідомлення
+    
+    faq_button_text = "Видалити з FAQ ❌" if new_faq_status else "Додати в FAQ ✨"
+    faq_status_mark = "✨ (FAQ)" if new_faq_status else "(Звичайна KB)"
+    
+    keyboard = [
+        [
+            InlineKeyboardButton("Редагувати ✏️", callback_data=f"kb_edit:{key_hash}"),
+            InlineKeyboardButton("Видалити 🗑️", callback_data=f"kb_delete:{key_hash}")
+        ],
+        [
+            InlineKeyboardButton(faq_button_text, callback_data=f"kb_faq_toggle:{key_hash}")
+        ]
+    ]
+
+    new_text = query.message.text.split("\n\n**Значення:**")[0] # Залишаємо тільки ключ
+    
+    status_message = "Додано до FAQ" if new_faq_status else "Видалено з FAQ"
+    
+    await query.edit_message_text(
+        text=f"✅ {status_message}.\n\n{key_to_edit} {faq_status_mark}\n\n**Значення:**\n`{data.get(KB_KEY_ANSWER)}`",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode='Markdown'
+    )
+
 async def delete_kb_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
@@ -780,7 +886,7 @@ async def start_kb_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     context.chat_data['key_to_edit'] = key_to_edit
     
     kb = load_data(KNOWLEDGE_BASE_FILE) or {}
-    current_value = kb.get(key_to_edit, "Не знайдено")
+    current_value = kb.get(key_to_edit, {}).get(KB_KEY_ANSWER, "Не знайдено")
 
     await query.message.reply_text(
         f"Редагування запису.\n**Ключ:** `{key_to_edit}`\n"
@@ -801,8 +907,12 @@ async def get_kb_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     kb = load_data(KNOWLEDGE_BASE_FILE) or {}
     if not isinstance(kb, dict): kb = {}
-
-    kb[key_to_edit] = new_value
+    
+    # Оновлюємо лише поле відповіді, зберігаючи статус FAQ
+    data = kb.get(key_to_edit, {})
+    data[KB_KEY_ANSWER] = new_value
+    kb[key_to_edit] = data
+    
     save_data(kb, KNOWLEDGE_BASE_FILE) # Зберігає локально і синхронізує з Sheets
 
     await update.message.reply_text(f"✅ Запис успішно оновлено та синхронізовано з Google Sheets!\n\n**{key_to_edit}**: {new_value}", parse_mode='Markdown')
@@ -820,13 +930,17 @@ async def faq_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     context.bot_data['faq_key_map'].clear()
 
     buttons = []
-    for key in kb.keys():
+    
+    # Фільтруємо лише ті записи, де KB_KEY_IS_FAQ (стовпець FAQ) не порожній
+    faq_questions = {k: v for k, v in kb.items() if v.get(KB_KEY_IS_FAQ)}
+    
+    for key in faq_questions.keys():
         key_hash = hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]
         context.bot_data['faq_key_map'][key_hash] = key
         buttons.append([InlineKeyboardButton(key, callback_data=f"faq_key:{key_hash}")])
 
     if not buttons:
-        await update.message.reply_text("Наразі поширених запитань немає.")
+        await update.message.reply_text("Наразі поширених запитань немає. Адміністратор може додати їх через /admin.")
         return
 
     reply_markup = InlineKeyboardMarkup(buttons)
@@ -844,7 +958,8 @@ async def faq_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     kb = load_data(KNOWLEDGE_BASE_FILE) or {}
-    answer = kb.get(key)
+    data = kb.get(key, {})
+    answer = data.get(KB_KEY_ANSWER)
 
     if answer:
         await query.message.reply_text(f"**{key}**\n\n{answer}", parse_mode='Markdown')
@@ -2205,6 +2320,7 @@ async def main() -> None:
     application.add_handler(CallbackQueryHandler(handle_post_broadcast_confirmation, pattern='^(confirm_post|cancel_post):.*$'))
     application.add_handler(CallbackQueryHandler(view_kb, pattern='^admin_kb_view$'))
     application.add_handler(CallbackQueryHandler(delete_kb_entry, pattern=r'^kb_delete:.*$'))
+    application.add_handler(CallbackQueryHandler(toggle_kb_faq_status, pattern=r'^kb_faq_toggle:.*$')) # НОВИЙ ХЕНДЛЕР ДЛЯ FAQ КНОПКИ
     application.add_handler(CallbackQueryHandler(faq_button_handler, pattern='^faq_key:'))
     application.add_handler(CallbackQueryHandler(view_scheduled_posts, pattern='^admin_view_scheduled$'))
     application.add_handler(CallbackQueryHandler(cancel_scheduled_job_button, pattern='^cancel_job:'))
