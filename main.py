@@ -527,8 +527,14 @@ async def gather_all_context(query: str) -> str:
         context_parts.append("**Контекст з сайту:**\nНе вдалося отримати.")
 
     if relevant_kb_simple:
-        # Для передачі ШІ перетворюємо в простий формат ключ: відповідь
-        context_parts.append(f"**Контекст з бази даних:**\n{json.dumps(relevant_kb_simple, ensure_ascii=False)}")
+        # === КРИТИЧНЕ ВИПРАВЛЕННЯ ДЛЯ ШІ: ФОРМАТУВАННЯ КОНТЕКСТУ ===
+        # Замість простого dump JSON, ми даємо ШІ краще структурований текст,
+        # щоб він міг його переписати, а не просто вивести.
+        kb_text = "--- База знань (ФАКТИ) ---\n"
+        for key, value in relevant_kb_simple.items():
+            kb_text += f"- Заголовок: {key}\n  Дані: {value}\n"
+            
+        context_parts.append(kb_text)
     else:
         context_parts.append("**Контекст з бази даних:**\nНічого релевантного не знайдено.")
 
@@ -549,7 +555,8 @@ async def try_ai_autoreply(user_question: str) -> str | None:
         "--- ЗАПИТАННЯ КОРИСТУВАЧА ---\n"
         f"'{user_question}'\n\n"
         "--- ІНСТРУКЦІЯ ---"
-        "Розпочни свою відповідь одним із двох токенів: [CONFIDENT] або [UNCERTAIN]. Після токена напиши саму відповідь ввічливою українською мовою. "
+        "Якщо ти CONFIDENT, ти повинен **переформулювати та об'єднати** знайдені факти з 'Бази знань' та 'Контексту з сайту' у **плавний, природний текст**, уникаючи прямого цитування та стокових фраз. Відповідь має бути ввічливою українською мовою. "
+        "Розпочни свою відповідь одним із двох токенів: [CONFIDENT] або [UNCERTAIN]. Після токена напиши саму відповідь. "
         "--- ТВОЯ ВІДПОВІДЬ (починається з [CONFIDENT] або [UNCERTAIN]) ---"
     )
 
@@ -1193,7 +1200,7 @@ async def generate_post_from_site(update: Update, context: ContextTypes.DEFAULT_
         try:
             await query.edit_message_text(f"❌ *Сталася помилка:* {e}")
         except:
-            await context.bot.send_message(query.from_user.id, f"❌ *Сталася помижка:* {e}")
+            await context.bot.send_message(query.from_user.id, f"❌ *Сталася помилка:* {e}")
 async def handle_post_broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
