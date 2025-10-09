@@ -1535,7 +1535,6 @@ async def receive_anonymous_message(update: Update, context: ContextTypes.DEFAUL
         await send_telegram_reply(context.application, user_id, f"🤫 **Відповідь на ваше анонімне звернення (від ШІ):**\n\n{ai_response}")
         
         # Сповіщення адмінів про автоматичну відповідь
-        admin_note = " [ТЕСТ]" if user_id in ADMIN_IDS else ""
         notification_text = (
             f"✅ **АВТО-ВІДПОВІДЬ АНОНІМУ (ШІ){admin_note}**\n\n"
             f"**ID:** {user_id}\n"
@@ -1836,7 +1835,7 @@ async def send_anonymous_ai_reply_to_user(update: Update, context: ContextTypes.
     try:
         await send_telegram_reply(context.application, user_id, f"🤫 **Відповідь на ваше анонімне звернення (від ШІ):**\n\n{ai_response_text}")
         
-        # ВИПРАВЛЕНО: Редагуємо повідомлення, щоб позначити, що на нього відповіли
+        # ВИПРАВЛЕНО: Редагуємо повідомлення, щоб позначити, що на його відповіли
         original_text = query.message.text.split("\n\n🤖 **Ось відповідь від ШІ для аноніма")[0]
         final_text = f"{original_text}\n\n✅ **ВІДПОВІДЬ АНОНІМУ НАДІСЛАНА (ШІ).**"
         
@@ -2394,7 +2393,7 @@ async def main() -> None:
     application.add_handler(CallbackQueryHandler(admin_stats_handler, pattern='^admin_stats$'))
     application.add_handler(CallbackQueryHandler(website_update_handler, pattern='^(broadcast_website|cancel_website_update):.*$'))
     application.add_handler(CallbackQueryHandler(generate_post_from_site, pattern='^admin_generate_post$'))
-    application.add_handler(CallbackHandler(handle_post_broadcast_confirmation, pattern='^(confirm_post|cancel_post):.*$'))
+    application.add_handler(CallbackQueryHandler(handle_post_broadcast_confirmation, pattern='^(confirm_post|cancel_post):.*$')) # ВИПРАВЛЕНО: CallbackHandler на CallbackQueryHandler
     application.add_handler(CallbackQueryHandler(view_kb, pattern='^admin_kb_view$'))
     application.add_handler(CallbackQueryHandler(delete_kb_entry, pattern=r'^kb_delete:.*$'))
     application.add_handler(CallbackQueryHandler(toggle_kb_faq_status, pattern=r'^kb_faq_toggle:.*$')) # НОВИЙ ХЕНДЛЕР ДЛЯ FAQ КНОПКИ
