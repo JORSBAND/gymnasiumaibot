@@ -10,13 +10,15 @@ from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes,
     CallbackQueryHandler, ConversationHandler
 )
-# Не забудьте встановити: pip install python-telegram-bot google-generativeai requests beautifulsoup4 pytz aiohttp
+# Не забудьте встановити: pip install python-telegram-bot google-generativeai requests beautifulsoup4 pytz aiohttp gspread oauth2client
 import requests
 from bs4 import BeautifulSoup
 import pytz
 from typing import Any, Callable, Dict
 import re
 import hashlib
+import gspread # ДОДАНО: Google Sheets API
+from oauth2client.service_account import ServiceAccountCredentials # ДОДАНО: Для авторизації
 # --- Web App мінімальні імпорти для Render (залишено для імітації відкритого порту) ---
 from aiohttp import web
 
@@ -47,14 +49,105 @@ TARGET_CHANNEL_ID = -1002946740131
 ADMIN_CONTACTS_FILE = 'admin_contacts.json'
 CONVERSATIONS_FILE = 'conversations.json'
 SCHEDULED_POSTS_FILE = 'scheduled_posts.json'
-KNOWLEDGE_BASE_FILE = 'knowledge_base.json' # Визначення константи для бази знань
+KNOWLEDGE_BASE_FILE = 'knowledge_base.json' # Локальний кеш бази знань
+
+# --- НАЛАШТУВАННЯ GOOGLE SHEETS (КРИТИЧНО) ---
+# Назва вашої Google Таблиці
+GSHEET_NAME = os.environ.get("GSHEET_NAME", "Бродівська гімназія - База Знань")
+# Назва листа (вкладки) у таблиці
+GSHEET_WORKSHEET_NAME = os.environ.get("GSHEET_WORKSHEET_NAME", "База_Знань")
+# JSON-ключі сервісного облікового запису (як змінна оточення)
+GCP_CREDENTIALS_JSON = os.environ.get("GCP_CREDENTIALS_JSON", "{}") 
 # --- Кінець налаштувань ---
 
 # Логування
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Функція для отримання початкових даних бази знань (на основі запиту користувача) ---
+# --- GOOGLE SHEETS УТИЛІТИ ---
+
+GSHEET_SCOPE = [
+    'https://spreadsheets.google.com/feeds', 
+    'https://www.googleapis.com/auth/drive'
+]
+
+def get_gsheet_client():
+    """Створює та повертає gspread клієнт для взаємодії з Google Sheets."""
+    try:
+        creds_dict = json.loads(GCP_CREDENTIALS_JSON)
+        if not creds_dict:
+            logger.error("GCP_CREDENTIALS_JSON порожній. Неможливо підключитися до Google Sheets.")
+            return None
+            
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, GSHEET_SCOPE)
+        client = gspread.authorize(creds)
+        
+        # Відкриття таблиці
+        sheet = client.open(GSHEET_NAME)
+        # Отримання робочого листа за назвою
+        worksheet = sheet.worksheet(GSHEET_WORKSHEET_NAME)
+        return worksheet
+    except gspread.exceptions.SpreadsheetNotFound:
+        logger.error(f"Таблиця Google з назвою '{GSHEET_NAME}' не знайдена.")
+        return None
+    except gspread.exceptions.WorksheetNotFound:
+        logger.error(f"Лист Google з назвою '{GSHEET_WORKSHEET_NAME}' не знайдений у таблиці '{GSHEET_NAME}'.")
+        return None
+    except Exception as e:
+        logger.error(f"Помилка ініціалізації GSheet Client: {e}")
+        return None
+
+def save_data_to_gsheet(kb_data: Dict[str, str]) -> bool:
+    """Зберігає поточну базу знань у Google Sheets."""
+    worksheet = get_gsheet_client()
+    if not worksheet:
+        logger.error("Не вдалося отримати клієнт Google Sheets для збереження.")
+        return False
+    
+    try:
+        # Перетворюємо словник у список списків [["Питання", "Відповідь"], ...]
+        records = [["Питання", "Відповідь"]] # Заголовок
+        records.extend([[k, v] for k, v in kb_data.items()])
+        
+        # Очищуємо весь лист і завантажуємо нові дані
+        worksheet.clear()
+        worksheet.update('A1', records)
+        logger.info(f"✅ Успішно збережено {len(kb_data)} записів у Google Sheets.")
+        return True
+    except Exception as e:
+        logger.error(f"Помилка запису в Google Sheets: {e}")
+        return False
+
+def fetch_kb_from_sheets() -> Dict[str, str] | None:
+    """Завантажує базу знань із Google Sheets."""
+    worksheet = get_gsheet_client()
+    if not worksheet:
+        return None 
+    
+    try:
+        # Отримуємо всі дані як список списків
+        list_of_lists = worksheet.get_all_values()
+        
+        if not list_of_lists or len(list_of_lists) < 2:
+            logger.warning("Google Sheets порожній або містить лише заголовок.")
+            return {}
+
+        # Перший рядок - заголовок, ігноруємо його
+        data_rows = list_of_lists[1:]
+        kb = {}
+        for row in data_rows:
+            if len(row) >= 2 and row[0].strip():
+                kb[row[0].strip()] = row[1].strip()
+        
+        logger.info(f"✅ Успішно завантажено {len(kb)} записів із Google Sheets.")
+        return kb
+
+    except Exception as e:
+        logger.error(f"Помилка читання з Google Sheets: {e}")
+        return None
+# --- КІНЕЦЬ GOOGLE SHEETS УТИЛІТ ---
+
+# --- Функція для отримання початкових даних бази знань (резерв) ---
 def get_default_knowledge_base() -> Dict[str, str]:
     """Повертає початковий вміст бази знань у форматі 'ключ: значення'."""
     return {
@@ -100,15 +193,26 @@ def get_default_knowledge_base() -> Dict[str, str]:
 def load_data(filename: str, default_type: Any = None) -> Any:
     try:
         with open(filename, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            data = json.load(f)
+            # Якщо завантажуємо базу знань, перевіряємо, чи вона порожня
+            if filename == KNOWLEDGE_BASE_FILE and not data:
+                raise json.JSONDecodeError("Local KB is empty or corrupted, forcing reload.", f.name, 0)
+            return data
     except (FileNotFoundError, json.JSONDecodeError):
-        # Логіка для ініціалізації knowledge_base.json, якщо він відсутній
         if filename == KNOWLEDGE_BASE_FILE:
-            default_kb = get_default_knowledge_base()
-            # Зберігаємо його, щоб він був доступний для подальших модифікацій
-            save_data(default_kb, filename)
-            logger.info("Створено початковий файл knowledge_base.json з даними гімназії.")
-            return default_kb
+            # 1. Спроба завантажити з Google Sheets
+            kb_from_sheets = fetch_kb_from_sheets()
+            
+            # 2. Якщо завантаження з Sheets не вдалося або воно порожнє, використовуємо резерв
+            if kb_from_sheets is None or not kb_from_sheets:
+                logger.warning("Завантаження з Google Sheets не вдалося або порожнє. Використовуються дані за замовчуванням.")
+                kb_data = get_default_knowledge_base()
+            else:
+                kb_data = kb_from_sheets
+
+            # 3. Зберігаємо локально для кешування та подальших модифікацій
+            save_data(kb_data, filename)
+            return kb_data
             
         if default_type is not None:
             return default_type
@@ -119,6 +223,11 @@ def save_data(data: Any, filename: str) -> None:
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
+            
+        # Якщо ми зберігаємо базу знань, пробуємо синхронізувати її з Google Sheets
+        if filename == KNOWLEDGE_BASE_FILE:
+            save_data_to_gsheet(data) # Асинхронність тут не потрібна, gspread працює синхронно
+            
     except Exception as e:
         logger.error(f"Помилка save_data({filename}): {e}")
 
@@ -560,11 +669,13 @@ async def get_kb_value(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if not key:
         await update.message.reply_text("Ключ не знайдено. Повторіть операцію.", parse_mode='Markdown')
         return ConversationHandler.END
+        
     kb = load_data(KNOWLEDGE_BASE_FILE) or {}
     if not isinstance(kb, dict): kb = {}
     kb[key] = value
-    save_data(kb, KNOWLEDGE_BASE_FILE)
-    await update.message.reply_text(f"✅ Дані успішно збережено!\n\n**{key}**: {value}", parse_mode='Markdown')
+    save_data(kb, KNOWLEDGE_BASE_FILE) # Зберігає локально і синхронізує з Sheets
+    
+    await update.message.reply_text(f"✅ Дані успішно збережено та синхронізовано з Google Sheets!\n\n**{key}**: {value}", parse_mode='Markdown')
     return ConversationHandler.END
 
 async def view_kb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -573,6 +684,7 @@ async def view_kb(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
     
+    # Завантажуємо актуальні дані (з Sheets, якщо локальний кеш неактуальний)
     kb = load_data(KNOWLEDGE_BASE_FILE) or {}
     if not kb or not isinstance(kb, dict):
         await query.edit_message_text("База знань порожня або пошкоджена.")
@@ -622,8 +734,8 @@ async def delete_kb_entry(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     kb = load_data(KNOWLEDGE_BASE_FILE) or {}
     if key_to_delete in kb:
         del kb[key_to_delete]
-        save_data(kb, KNOWLEDGE_BASE_FILE)
-        await query.edit_message_text(f"✅ Запис з ключем `{key_to_delete}` видалено.", parse_mode='Markdown')
+        save_data(kb, KNOWLEDGE_BASE_FILE) # Зберігає локально і синхронізує з Sheets
+        await query.edit_message_text(f"✅ Запис з ключем `{key_to_delete}` видалено та синхронізовано.", parse_mode='Markdown')
     else:
         await query.edit_message_text(f"❌ Помилка: запис з ключем `{key_to_delete}` не знайдено (можливо, вже видалено).", parse_mode='Markdown')
         
@@ -666,12 +778,13 @@ async def get_kb_edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not isinstance(kb, dict): kb = {}
 
     kb[key_to_edit] = new_value
-    save_data(kb, KNOWLEDGE_BASE_FILE)
+    save_data(kb, KNOWLEDGE_BASE_FILE) # Зберігає локально і синхронізує з Sheets
 
-    await update.message.reply_text(f"✅ Запис успішно оновлено!\n\n**{key_to_edit}**: {new_value}", parse_mode='Markdown')
+    await update.message.reply_text(f"✅ Запис успішно оновлено та синхронізовано з Google Sheets!\n\n**{key_to_edit}**: {new_value}", parse_mode='Markdown')
     return ConversationHandler.END
 
 async def faq_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Завантажуємо актуальні дані (з Sheets, якщо локальний кеш неактуальний)
     kb = load_data(KNOWLEDGE_BASE_FILE) or {}
     if not kb or not isinstance(kb, dict):
         await update.message.reply_text("Наразі поширених запитань немає.")
@@ -1009,7 +1122,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "• `/anonymous` - Створити анонімне звернення (для тестування).\n\n"
             "**Обробка звернень:**\n"
             "Повідомлення від користувачів, на які ШІ не зміг відповісти, надходять із кнопками 'Відповісти за допомогою ШІ' та 'Відповісти особисто'. "
-            "Ви також можете просто **відповісти (Reply)** на повідомлення бота з повідомленням від користувача, щоб надіслати йому пряму відповідь."
+            "Ви також можете просто **відповісти (Reply)** на повідомленні від бота з повідомленням від користувача, щоб надіслати йому пряму відповідь."
         )
     else:
         help_text = (
