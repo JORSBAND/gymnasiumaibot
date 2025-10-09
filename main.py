@@ -83,9 +83,8 @@ logger = logging.getLogger(__name__)
  WAITING_FOR_NEWS_TEXT, CONFIRMING_NEWS_ACTION, WAITING_FOR_MEDIA,
  SELECTING_TEST_USER, WAITING_FOR_TEST_NAME, WAITING_FOR_TEST_ID,
  WAITING_FOR_TEST_MESSAGE, WAITING_FOR_KB_EDIT_VALUE,
- WAITING_FOR_SCHEDULE_TEXT, WAITING_FOR_SCHEDULE_TIME, CONFIRMING_SCHEDULE_POST) = range(21)
-
-
+ WAITING_FOR_SCHEDULE_TEXT, WAITING_FOR_SCHEDULE_TIME, CONFIRMING_SCHEDULE_POST,
+ **WAITING_FOR_ADMIN_MESSAGE**) = range(22) # Змінено range на 22
 # --- GOOGLE SHEETS УТИЛІТИ ---
 
 GSHEET_SCOPE = [
@@ -650,12 +649,64 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             InlineKeyboardButton("Перевірити базу знань 🔎", callback_data="admin_kb_view")
         ],
         [
-            InlineKeyboardButton("Створити пост з сайту 📰", callback_data="admin_generate_post"),
+            InlineKeyboardButton("Сповістити адмінів 🔔", callback_data="admin_notify_admins"), # НОВА КНОПКА
             InlineKeyboardButton("Статистика 📊", callback_data="admin_stats")
         ]
     ]
     await update.message.reply_text("🔐 **Адміністративна панель:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+# НОВИЙ БЛОК: Сповіщення адмінів
+async def start_notify_admins(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    query = update.callback_query
+    if not query: return ConversationHandler.END
+    if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
+    await query.answer()
     
+    await query.edit_message_text(
+        "Надішліть повідомлення (з текстом, фото або відео) для сповіщення інших адміністраторів.\n\n/cancel для скасування."
+    )
+    
+    return WAITING_FOR_ADMIN_MESSAGE
+
+async def receive_admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    sender_id = update.effective_user.id
+    sender_name = get_admin_name(sender_id)
+    message = update.message
+    
+    text = message.caption or message.text or ""
+    photo = message.photo[-1].file_id if message.photo else None
+    video = message.video.file_id if message.video else None
+
+    if not (text or photo or video):
+        await update.message.reply_text("Будь ласка, надішліть текст або медіафайл.")
+        return WAITING_FOR_ADMIN_MESSAGE
+        
+    forward_text = f"🔔 **Сповіщення від адміністратора:**\n\n**Від:** {sender_name} (ID: {sender_id})\n\n**Текст:**\n---\n{text}"
+    
+    success_count = 0
+    fail_count = 0
+    
+    for admin_id in ADMIN_IDS:
+        if admin_id != sender_id: # Надсилаємо всім, крім відправника
+            try:
+                if photo:
+                    await context.bot.send_photo(chat_id=admin_id, photo=photo, caption=forward_text, parse_mode='Markdown')
+                elif video:
+                    await context.bot.send_video(chat_id=admin_id, video=video, caption=forward_text, parse_mode='Markdown')
+                else:
+                    await context.bot.send_message(chat_id=admin_id, text=forward_text, parse_mode='Markdown')
+                success_count += 1
+            except Exception as e:
+                logger.error(f"Не вдалося надіслати сповіщення адміну {admin_id}: {e}")
+                fail_count += 1
+                
+    await update.message.reply_text(
+        f"✅ Сповіщення надіслано.\nОтримано: {success_count} адмінами.\nПомилок: {fail_count}"
+    )
+
+    return ConversationHandler.END
+# КІНЕЦЬ НОВОГО БЛОКУ
+
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id not in ADMIN_IDS: return # Перевірка прав доступу
     
@@ -688,6 +739,7 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• **Зробити розсилку 📢**: Швидкий спосіб надіслати текстове повідомлення всім користувачам.\n"
         "• **Внести дані в базу ✍️**: Додає нову інформацію (питання-відповідь) до бази знань.\n"
         "• **Перевірити базу знань 🔎**: Показує весь вміст бази з кнопками для редагування/видалення.\n"
+        "• **Сповістити адмінів 🔔**: Надсилає повідомлення з медіа або без іншим адмінам.\n"
         "• **Створити пост з сайту 📰**: Автоматично генерує новину з головної сторінки сайту."
     )
     info_text_4 = (
@@ -2306,6 +2358,14 @@ async def main() -> None:
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
+    # НОВА КОНВЕРСАЦІЯ ДЛЯ СПОВІЩЕННЯ АДМІНІВ
+    admin_notify_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(start_notify_admins, pattern='^admin_notify_admins$')],
+        states={
+            WAITING_FOR_ADMIN_MESSAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND | filters.PHOTO | filters.VIDEO, receive_admin_message)]
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
     test_message_conv = ConversationHandler(
         entry_points=[CommandHandler("testm", test_message_command)],
         states={
@@ -2351,6 +2411,7 @@ async def main() -> None:
     application.add_handler(admin_reply_conv)
     application.add_handler(create_news_conv)
     application.add_handler(schedule_news_conv)
+    application.add_handler(admin_notify_conv) # ДОДАНО НОВУ КОНВЕРСАЦІЮ
     application.add_handler(test_message_conv)
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
     application.add_handler(user_conv)
