@@ -29,7 +29,7 @@ import aiohttp_cors
 # !!! ВАЖЛИВО: Замініть "YOUR_NEW_TELEGRAM_BOT_TOKEN_HERE" на ваш дійсний токен Telegram !!!
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8223675237:AAF_kmo6SP4XZS23NeXWFxgkQNUaEZOWNx0")
 # !!! КРИТИЧНО: Переконайтеся, що всі ключі Gemini дійсні та мають активний баланс! !!!
-GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEc6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyA6op6ah5PD5U_mICb_QXY_IH-3RGVEwEs")
+GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyBtIxTceQYA6UAUyr9R0RrQWQzFNEnWXYA,AIzaSyDH5sprfzkyfltY8wSjSBYvccRcpArvLRo,AIzaSyDhEA8jiGQ9ngcYn3hc445slrQIIVrPocI")
 GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.strip()]
 CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c6912fc52ccb303667c92687")
 # !!! КРИТИЧНО: Токен Cloudflare не працює (401). Перевірте токен Cloudflare! !!!
