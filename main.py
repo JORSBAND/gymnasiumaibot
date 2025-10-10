@@ -3,15 +3,14 @@ import asyncio
 import uuid
 import json
 import logging
-import time # Додано для експоненційного відступу
 from datetime import datetime, time as dt_time
 import google.generativeai as genai
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes,
     CallbackQueryHandler, ConversationHandler
 )
-# Не забудьте встановити: pip install python-telegram-bot google-generativeai requests beautifulsoup4 pytz aiohttp gspread oauth2client
+# Не забудьте встановити: pip install python-telegram-bot google-generativeai requests beautifulsoup4 pytz aiohttp aiohttp_cors
 import requests
 from bs4 import BeautifulSoup
 import pytz
@@ -24,12 +23,13 @@ from urllib.parse import parse_qs
 
 # --- Web App мінімальні імпорти для Render (залишено для імітації відкритого порту) ---
 from aiohttp import web
+import aiohttp_cors
 
 # --- Налаштування ---
 # !!! ВАЖЛИВО: Замініть "YOUR_NEW_TELEGRAM_BOT_TOKEN_HERE" на ваш дійсний токен Telegram !!!
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8223675237:AAF_kmo6SP4XZS23NeXWFxgkQNUaEZOWNx0")
 # !!! КРИТИЧНО: Переконайтеся, що всі ключі Gemini дійсні та мають активний баланс! !!!
-GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyDH5sprfzkyfltY8wSjSBYvccRcpArvLRo,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyA6op6ah5PD5U_mICb_QXY_IH-3RGVEwEs")
+GEMINI_API_KEYS_STR = os.environ.get("GEMINI_API_KEYS", "AIzaSyAixFLqi1TZav-zeloDyz3doEc6awxrbU,AIzaSyARQhOvxTxLUUKc0f370d5u4nQAmQPiCYA,AIzaSyA6op6ah5PD5U_mICb_QXY_IH-3RGVEwEs")
 GEMINI_API_KEYS = [key.strip() for key in GEMINI_API_KEYS_STR.split(',') if key.strip()]
 CLOUDFLARE_ACCOUNT_ID = os.environ.get("CLOUDFLARE_ACCOUNT_ID", "238b1178c9612fc52ccb303667c92687")
 # !!! КРИТИЧНО: Токен Cloudflare не працює (401). Перевірте токен Cloudflare! !!!
@@ -476,7 +476,7 @@ def update_user_list(user_id: int, username: str | None, first_name: str | None,
 
 # Використання генерації тексту з експоненційним відступом
 async def generate_text_with_fallback(prompt: str) -> str | None:
-    # --- Спроба 1: Gemini API ---
+    # --- Спроба 1: Gemini API (3 спроби на ключ) ---
     for api_key in GEMINI_API_KEYS:
         for attempt in range(3): # 3 спроби на ключ
             try:
@@ -485,42 +485,69 @@ async def generate_text_with_fallback(prompt: str) -> str | None:
                 # Використовуємо gemini-1.5-flash, якщо не зазначено інше
                 model = genai.GenerativeModel('gemini-1.5-flash') 
                 response = await asyncio.to_thread(model.generate_content, prompt, request_options={'timeout': 45})
-                if response.text:
+                
+                # Перевірка на успішну відповідь або блокування безпекою
+                if response.text and response.candidates[0].finish_reason != 'SAFETY':
                     logger.info("Успішна відповідь від Gemini.")
                     return response.text
+                elif response.candidates[0].finish_reason == 'SAFETY':
+                    # Якщо блокування безпекою - переходимо до наступного ключа без затримки
+                    logger.warning(f"Gemini ключ ...{api_key[-4:]} заблокував відповідь (Safety). Перехід до наступного ключа.")
+                    break # Вихід із внутрішнього циклу (спроби)
+                else:
+                    # Інша помилка, наприклад, порожня відповідь
+                    raise Exception("Порожня відповідь від Gemini.")
+
             except Exception as e:
                 logger.warning(f"Gemini ключ ...{api_key[-4:]} не спрацював на спробі {attempt+1}: {e}")
-                await asyncio.sleep(2 ** attempt) # Експоненційний відступ
-                continue
+                if attempt < 2:
+                    # Експоненційний відступ: 1s, 2s, 4s
+                    delay = 2 ** attempt
+                    await asyncio.sleep(delay) 
+                continue # Наступна спроба з цим же ключем
         
-    # --- Спроба 2: Cloudflare AI ---
+        # Якщо 3 спроби з цим ключем не вдалися, переходимо до наступного ключа
+        if attempt == 2:
+            continue
+
+    # --- Спроба 2: Cloudflare AI (з експоненційним відступом) ---
     logger.warning("Усі ключі Gemini не спрацювали. Переходжу до Cloudflare AI.")
     if not CLOUDFLARE_ACCOUNT_ID or not CLOUDFLARE_API_TOKEN or "your_cf" in CLOUDFLARE_ACCOUNT_ID:
         logger.error("Не налаштовано дані для Cloudflare AI.")
         return None
 
-    for attempt in range(3):
+    for attempt in range(3): # 3 спроби для Cloudflare
         try:
+            logger.info(f"Спроба {attempt+1} з Cloudflare AI.")
             cf_url = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/ai/run/@cf/meta/llama-2-7b-chat-int8"
             headers = {"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"}
             payload = {"messages": [{"role": "user", "content": prompt}]}
+            
+            # Використовуємо asyncio.to_thread для неблокуючого виклику requests.post
             response = await asyncio.to_thread(
                 requests.post, cf_url, headers=headers, json=payload, timeout=45
             )
-            response.raise_for_status()
+            response.raise_for_status() # Викличе виняток для 4xx/5xx помилок
             result = response.json()
             cf_text = result.get("result", {}).get("response")
+            
             if cf_text:
                 logger.info("Успішна відповідь від Cloudflare AI.")
                 return cf_text
             else:
-                logger.error(f"Cloudflare AI повернув порожню відповідь: {result}")
-                return None
+                # Внутрішня помилка Cloudflare, що не викликала raise_for_status
+                raise Exception(f"Cloudflare AI повернув порожню відповідь: {result}")
+                
         except Exception as e:
             logger.error(f"Резервний варіант Cloudflare AI не спрацював на спробі {attempt+1}: {e}")
-            await asyncio.sleep(2 ** attempt)
-            continue
-    
+            if attempt < 2:
+                 # Експоненційний відступ: 1s, 2s, 4s
+                delay = 2 ** attempt
+                await asyncio.sleep(delay) 
+                continue
+            # Якщо остання спроба не вдалася, виходимо
+            break
+            
     logger.error("Усі спроби генерації тексту ШІ не вдалися.")
     return None
 
@@ -535,8 +562,9 @@ async def generate_image(prompt: str) -> bytes | None:
         "output_format": "jpeg",
         "aspect_ratio": "1:1"
     }
-    for attempt in range(3):
+    for attempt in range(3): # Додаємо 3 спроби для надійності
         try:
+            logger.info(f"Спроба {attempt+1} генерації зображення Stability AI...")
             response = await asyncio.to_thread(
                 requests.post,
                 api_url,
@@ -546,17 +574,24 @@ async def generate_image(prompt: str) -> bytes | None:
                 timeout=30
             )
             response.raise_for_status()
+            logger.info("Успішна генерація зображення.")
             return response.content
         except requests.RequestException as e:
             logger.error(f"Помилка генерації зображення через Stability AI на спробі {attempt+1}: {e}")
             if e.response is not None:
                 logger.error(f"Відповідь сервера: {e.response.text}")
-            await asyncio.sleep(2 ** attempt)
-            continue
+            if attempt < 2:
+                delay = 2 ** attempt
+                await asyncio.sleep(delay) # Експоненційний відступ
+                continue
+            break # Вихід після 3 невдалих спроб
         except Exception as e:
             logger.error(f"Невідома помилка при генерації зображення: {e}")
-            await asyncio.sleep(2 ** attempt)
-            continue
+            if attempt < 2:
+                delay = 2 ** attempt
+                await asyncio.sleep(delay)
+                continue
+            break
     return None
 
 def get_all_text_from_website() -> str | None:
@@ -815,7 +850,7 @@ async def admin_stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer()
     
     # Завантажуємо дані локально
-    user_data = load_data(USER_IDS_FILE)
+    user_data = load_data(USER_IDS_FILE) # Це список словників
     user_count = len(user_data)
     
     # Виводимо інформацію
@@ -961,7 +996,7 @@ async def toggle_kb_faq_status(update: Update, context: ContextTypes.DEFAULT_TYP
     status_message = "Додано до FAQ" if new_faq_status else "Видалено з FAQ"
     
     await query.edit_message_text(
-        text=f"✅ {status_message}.\n\n{key_to_edit} {faq_status_mark}\n\n**Значення:**\n`{data.get(KB_KEY_ANSWER)}`",
+        text=f"✅ {status_message}.\n\n**Ключ:** `{key_to_edit}` {faq_status_mark}\n\n**Значення:**\n`{data.get(KB_KEY_ANSWER)}`",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode='Markdown'
     )
@@ -1092,9 +1127,9 @@ async def scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         photo=job_data.get('photo'),
         video=job_data.get('video')
     )
-    scheduled_posts = load_data('scheduled_posts.json', [])
+    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
     updated_posts = [p for p in scheduled_posts if p.get('id') != context.job.name]
-    save_data(updated_posts, 'scheduled_posts.json')
+    save_data(updated_posts, SCHEDULED_POSTS_FILE)
 
 def remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
     current_jobs = context.job_queue.get_jobs_by_name(name)
@@ -1183,9 +1218,9 @@ async def confirm_schedule_post(update: Update, context: ContextTypes.DEFAULT_TY
 
     job_id = f"scheduled_post_{uuid.uuid4().hex[:10]}"
     
-    scheduled_posts = load_data('scheduled_posts.json', [])
+    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
     scheduled_posts.append({'id': job_id, 'text': post_data['text'], 'time': schedule_time.isoformat()})
-    save_data(scheduled_posts, 'scheduled_posts.json')
+    save_data(scheduled_posts, SCHEDULED_POSTS_FILE)
 
     context.job_queue.run_once(scheduled_broadcast_job, when=schedule_time, data=post_data, name=job_id)
 
@@ -1207,7 +1242,7 @@ async def view_scheduled_posts(update: Update, context: ContextTypes.DEFAULT_TYP
     if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
     
-    scheduled_posts = load_data('scheduled_posts.json', [])
+    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
     
     if not scheduled_posts:
         await query.edit_message_text("Немає запланованих постів.")
@@ -1241,9 +1276,9 @@ async def cancel_scheduled_job_button(update: Update, context: ContextTypes.DEFA
     
     job_name = query.data.split(':', 1)[1]
     
-    scheduled_posts = load_data('scheduled_posts.json', [])
+    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
     updated_list = [p for p in scheduled_posts if p['id'] != job_name]
-    save_data(updated_list, 'scheduled_posts.json')
+    save_data(updated_list, SCHEDULED_POSTS_FILE)
 
     if remove_job_if_exists(job_name, context):
         await query.edit_message_text("✅ Заплановану розсилку скасовано.")
@@ -1307,6 +1342,7 @@ async def generate_post_from_site(update: Update, context: ContextTypes.DEFAULT_
             await query.edit_message_text(f"❌ *Сталася помилка:* {e}")
         except:
             await context.bot.send_message(query.from_user.id, f"❌ *Сталася помилка:* {e}")
+            
 async def handle_post_broadcast_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query: return
@@ -1376,9 +1412,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # NOTE: тут ми беремо повний список dicts, а не set ID
     user_data = load_data(USER_IDS_FILE)
     if not any(user_dict['id'] == user.id for user_dict in user_data):
-         # Якщо користувач не був доданий в update_user_list (наприклад, якщо він був тільки в set ID), додаємо його.
-         # Але update_user_list вже має гарантувати його наявність. Цей рядок в теорії зайвий.
-         pass
+          # Якщо користувач не був доданий в update_user_list (наприклад, якщо він був тільки в set ID), додаємо його.
+          # Але update_user_list вже має гарантувати його наявність. Цей рядок в теорії зайвий.
+          pass
     
     await update.message.reply_text(
         'Вітаємо! Це офіційний бот каналу новин Бродівської гімназії.\n\n'
@@ -1733,7 +1769,7 @@ async def start_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 [InlineKeyboardButton("Надіслати відповідь ✅", callback_data=f"send_ai_reply:{context.chat_data['target_user_id']}")],
                 [InlineKeyboardButton("Скасувати ❌", callback_data="cancel_ai_reply")]
             ]
-            preview_text = f"{original_text}\n\n🤖 **Ось відповідь від ШІ:**\n\n{ai_response_text}\n\n---\n*Надіслати цю відповідь користувачу?*"
+            preview_text = f"🤖 **Ось відповідь від ШІ:**\n\n{ai_response_text}\n\n---\n*Надіслати цю відповідь користувачу?*"
             
             # ВИПРАВЛЕНО: Використовуємо edit_message_text для оновлення повідомлення
             await query.edit_message_text(text=preview_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
@@ -1979,7 +2015,7 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
         reply_intro = "✉️ **Відповідь від адміністратора:**"
     else:
         # Шукаємо ID анонімного користувача (короткий UUID)
-        anon_match = re.search(r"\(ID: ([a-f0-9\-]+)\)", text_to_scan)
+        anon_match = re.search(r"\(ID: ([a-f0-9]+)\)", text_to_scan)
         if anon_match:
             anon_id = anon_match.group(1)
             target_user_id = context.bot_data.get('anonymous_map', {}).get(anon_id)
@@ -2314,7 +2350,7 @@ async def main() -> None:
     
     # Завантаження початкових даних (викликає синхронізацію з Sheets, якщо локальний кеш порожній)
     application.bot_data['kb_data'] = load_data(KNOWLEDGE_BASE_FILE)
-    application.bot_data['admin_contacts'] = load_data('admin_contacts.json')
+    application.bot_data['admin_contacts'] = load_data(ADMIN_CONTACTS_FILE)
     
     # Завантаження ID користувачів
     user_data = load_data(USER_IDS_FILE) # Тепер це List[Dict]
