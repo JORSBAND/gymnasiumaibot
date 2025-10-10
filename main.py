@@ -170,8 +170,8 @@ def save_users_to_gsheet(users: List[dict]) -> bool:
         
         for user in users:
             if not isinstance(user, dict):
-                 logger.warning(f"Пропущено невірний елемент користувача (не словник) при записі у Sheets: {user}")
-                 continue
+                logger.warning(f"Пропущено невірний елемент користувача (не словник) при записі у Sheets: {user}")
+                continue
 
             records.append([
                 str(user.get('id', '')), # ID завжди як текст
@@ -477,38 +477,44 @@ def update_user_list(user_id: int, username: str | None, first_name: str | None,
 # Використання генерації тексту з експоненційним відступом
 async def generate_text_with_fallback(prompt: str) -> str | None:
     # --- Спроба 1: Gemini API (3 спроби на ключ) ---
+    GEMINI_MODEL = 'gemini-2.5-flash' # <--- ВИПРАВЛЕННЯ: Використовуємо надійну модель
+
     for api_key in GEMINI_API_KEYS:
         for attempt in range(3): # 3 спроби на ключ
             try:
-                logger.info(f"Спроба {attempt+1} з Gemini API ключем ...{api_key[-4:]}")
+                logger.info(f"Спроба {attempt+1} з Gemini API ключем ...{api_key[-4:]} (Модель: {GEMINI_MODEL})")
                 genai.configure(api_key=api_key)
-                # Використовуємо gemini-1.5-flash, якщо не зазначено інше
-                model = genai.GenerativeModel('gemini-1.5-flash') 
+                # Використовуємо gemini-2.5-flash
+                model = genai.GenerativeModel(GEMINI_MODEL) 
                 response = await asyncio.to_thread(model.generate_content, prompt, request_options={'timeout': 45})
                 
                 # Перевірка на успішну відповідь або блокування безпекою
-                if response.text and response.candidates[0].finish_reason != 'SAFETY':
+                if response.text and response.candidates and response.candidates[0].finish_reason != 'SAFETY':
                     logger.info("Успішна відповідь від Gemini.")
                     return response.text
-                elif response.candidates[0].finish_reason == 'SAFETY':
+                elif response.candidates and response.candidates[0].finish_reason == 'SAFETY':
                     # Якщо блокування безпекою - переходимо до наступного ключа без затримки
                     logger.warning(f"Gemini ключ ...{api_key[-4:]} заблокував відповідь (Safety). Перехід до наступного ключа.")
                     break # Вихід із внутрішнього циклу (спроби)
                 else:
                     # Інша помилка, наприклад, порожня відповідь
-                    raise Exception("Порожня відповідь від Gemini.")
+                    raise Exception("Порожня відповідь від Gemini або непередбачена помилка.")
 
             except Exception as e:
+                # Включаємо перевірку на 404, щоб логіка була більш чистою
+                if "404" in str(e) and GEMINI_MODEL in str(e):
+                    logger.error(f"Критична помилка конфігурації: Модель {GEMINI_MODEL} не знайдена. Перевірте список доступних моделей.")
+                    break # Немає сенсу продовжувати з цим ключем
+                    
                 logger.warning(f"Gemini ключ ...{api_key[-4:]} не спрацював на спробі {attempt+1}: {e}")
                 if attempt < 2:
                     # Експоненційний відступ: 1s, 2s, 4s
                     delay = 2 ** attempt
                     await asyncio.sleep(delay) 
-                continue # Наступна спроба з цим же ключем
+                    continue # Наступна спроба з цим же ключем
         
-        # Якщо 3 спроби з цим ключем не вдалися, переходимо до наступного ключа
-        if attempt == 2:
-            continue
+        # Якщо 3 спроби з цим ключем не вдалися або була критична помилка, переходимо до наступного ключа
+        continue
 
     # --- Спроба 2: Cloudflare AI (з експоненційним відступом) ---
     logger.warning("Усі ключі Gemini не спрацювали. Переходжу до Cloudflare AI.")
@@ -2147,7 +2153,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                  )
              except Exception:
                  pass 
-                 
+             
         context.user_data.clear()
         context.chat_data.clear()
         return ConversationHandler.END
