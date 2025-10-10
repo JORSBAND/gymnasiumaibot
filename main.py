@@ -6,7 +6,7 @@ import logging
 import time # Додано для експоненційного відступу
 from datetime import datetime, time as dt_time
 import google.generativeai as genai
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ReplyKeyboardRemove
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, ReplyKeyboardRemove, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes,
     CallbackQueryHandler, ConversationHandler
@@ -15,11 +15,13 @@ from telegram.ext import (
 import requests
 from bs4 import BeautifulSoup
 import pytz
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, List
 import re
 import hashlib
 import gspread # ДОДАНО: Google Sheets API
 from oauth2client.service_account import ServiceAccountCredentials # ДОДАНО: Для авторизації
+from urllib.parse import parse_qs
+
 # --- Web App мінімальні імпорти для Render (залишено для імітації відкритого порту) ---
 from aiohttp import web
 
@@ -73,6 +75,10 @@ KB_KEY_IS_FAQ = "FAQ"
 # Логування
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# --- Глобальні змінні для веб-сервера ---
+active_websockets: Dict[str, web.WebSocketResponse] = {}
+web_sessions: Dict[str, Dict] = {} 
 
 # --- СТАНИ ДЛЯ CONVERSATIONHANDLER (ПОВНИЙ СПИСОК) ---
 # Цей блок повинен бути перед усіма хендлерами, що його використовують
@@ -147,34 +153,43 @@ def save_data_to_gsheet(kb_data: Dict[str, dict]) -> bool:
         logger.error(f"Помилка запису KB в Google Sheets: {e}")
         return False
 
-def save_users_to_gsheet(users: list[dict]) -> bool:
-    """Зберігає список користувачів та їхні дані у Google Sheets (лист Користувачі)."""
+def save_users_to_gsheet(users: List[dict]) -> bool:
+    """
+    ЗБЕРЕЖЕННЯ КОРИСТУВАЧІВ (ОНОВЛЕНО):
+    Зберігає список користувачів та їхні дані у Google Sheets. 
+    Видалено повне очищення таблиці, щоб дозволити лише оновлення/внесення даних.
+    """
     worksheet = get_gsheet_client(USERS_GSHEET_WORKSHEET_NAME)
     if not worksheet:
         logger.error("Не вдалося отримати клієнт Google Sheets для збереження користувачів.")
         return False
 
     try:
-        # Форматуємо дані: [["ID", "Ім'я користувача", "Дата останнього запуску"], ...]
-        records = [["ID", "Ім'я користувача", "Дата останнього запуску"]] 
+        # Форматуємо дані: [["ID", "Ім'я користувача (нік)", "Повне Ім'я", "Дата останнього запуску"], ...]
+        records = [["ID", "Ім'я користувача (нік)", "Повне Ім'я", "Дата останнього запуску"]] 
         
         for user in users:
-            # === ВИПРАВЛЕННЯ: Додано перевірку, чи є елемент словником ===
             if not isinstance(user, dict):
                  logger.warning(f"Пропущено невірний елемент користувача (не словник) при записі у Sheets: {user}")
                  continue
-            # ==========================================================
 
             records.append([
-                user.get('id', ''),
-                user.get('username', user.get('full_name', 'N/A')),
+                str(user.get('id', '')), # ID завжди як текст
+                user.get('username', ''),
+                user.get('full_name', ''), # Новий стовпець
                 user.get('last_run', '')
             ])
         
-        # Очищуємо весь лист і завантажуємо нові дані
-        worksheet.batch_clear(["A1:C1000"])
-        worksheet.update('A1', records)
-        logger.info(f"✅ Успішно збережено {len(users)} записів користувачів у Google Sheets.")
+        # Розраховуємо діапазон для запису. 
+        # !!! КРИТИЧНО: Видалено worksheet.batch_clear(), щоб не видаляти старі дані.
+        # Просто перезаписуємо потрібний діапазон.
+        num_rows = len(records)
+        num_cols = len(records[0]) if records else 0
+        end_col = chr(ord('A') + num_cols - 1)
+        range_to_update = f"A1:{end_col}{num_rows}"
+        
+        worksheet.update(range_to_update, records)
+        logger.info(f"✅ Успішно збережено {len(users)} записів користувачів у Google Sheets (без видалення).")
         return True
     except Exception as e:
         logger.error(f"Помилка запису користувачів в Google Sheets: {e}")
@@ -221,6 +236,54 @@ def fetch_kb_from_sheets() -> Dict[str, dict] | None:
 
     except Exception as e:
         logger.error(f"Помилка читання KB з Google Sheets: {e}")
+        return None
+
+def fetch_users_from_sheets() -> List[dict] | None:
+    """
+    ЧИТАННЯ КОРИСТУВАЧІВ (НОВА ФУНКЦІЯ):
+    Завантажує список користувачів із Google Sheets. 
+    Повертає: [{'id': 123, 'username': '...', 'full_name': '...', 'last_run': '...'}, ...]
+    """
+    worksheet = get_gsheet_client(USERS_GSHEET_WORKSHEET_NAME)
+    if not worksheet: return None 
+    
+    try:
+        list_of_lists = worksheet.get_all_values()
+        if not list_of_lists or len(list_of_lists) < 2: return []
+
+        header = [h.strip() for h in list_of_lists[0]]
+        
+        # Індекси стовпців для коректного парсингу
+        id_idx = header.index("ID") if "ID" in header else 0
+        username_idx = header.index("Ім'я користувача (нік)") if "Ім'я користувача (нік)" in header else 1
+        # НОВИЙ СТОВПЕЦЬ: Повне Ім'я
+        fullname_idx = header.index("Повне Ім'я") if "Повне Ім'я" in header else 2 
+        lastrun_idx = header.index("Дата останнього запуску") if "Дата останнього запуску" in header else 3
+        
+        data_rows = list_of_lists[1:]
+        users = []
+        for row in data_rows:
+            user_id_str = row[id_idx].strip() if len(row) > id_idx else None
+            if not user_id_str: continue
+
+            # Спроба конвертувати ID в int, якщо це Telegram ID
+            try:
+                user_id = int(user_id_str)
+            except ValueError:
+                user_id = user_id_str # Залишаємо web-ID як string
+            
+            users.append({
+                'id': user_id,
+                'username': row[username_idx].strip() if len(row) > username_idx else None,
+                'full_name': row[fullname_idx].strip() if len(row) > fullname_idx else None,
+                'last_run': row[lastrun_idx].strip() if len(row) > lastrun_idx else None
+            })
+        
+        logger.info(f"✅ Успішно завантажено {len(users)} записів користувачів із Google Sheets.")
+        return users
+
+    except Exception as e:
+        logger.error(f"Помилка читання користувачів з Google Sheets: {e}")
         return None
 # --- КІНЕЦЬ GOOGLE SHEETS УТИЛІТ ---
 
@@ -271,8 +334,24 @@ def load_data(filename: str, default_type: Any = None) -> Any:
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
+            
+            # Логіка для бази знань
             if filename == KNOWLEDGE_BASE_FILE and not data:
                 raise json.JSONDecodeError("Local KB is empty or corrupted, forcing reload.", f.name, 0)
+            
+            # Логіка для користувачів
+            if filename == USER_IDS_FILE:
+                # Перетворюємо старий формат (список int) на новий (список dict)
+                sanitized_users = []
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and 'id' in item:
+                            sanitized_users.append(item)
+                        elif isinstance(item, int):
+                            # Мігруємо старі прості ID в словники з мінімальними даними
+                            sanitized_users.append({'id': item, 'full_name': 'N/A', 'username': None, 'last_run': 'N/A (Migrated)'})
+                return sanitized_users
+            
             return data
     except (FileNotFoundError, json.JSONDecodeError):
         if filename == KNOWLEDGE_BASE_FILE:
@@ -289,9 +368,16 @@ def load_data(filename: str, default_type: Any = None) -> Any:
             # 3. Зберігаємо локально для кешування та подальших модифікацій
             save_data(kb_data, filename)
             return kb_data
-        
+            
         if filename == USER_IDS_FILE:
-             return []
+            # 1. Спроба завантажити з Google Sheets (щоб отримати найбільш повний список)
+            users_from_sheets = fetch_users_from_sheets()
+            if users_from_sheets is not None:
+                # 2. Зберігаємо локально для кешування та подальших модифікацій
+                save_data(users_from_sheets, filename)
+                return users_from_sheets
+            # 3. Якщо все не вдалося, повертаємо порожній список
+            return []
             
         if default_type is not None:
             return default_type
@@ -312,8 +398,8 @@ def save_data(data: Any, filename: str) -> None:
                 loop
             )
         # Якщо ми зберігаємо список користувачів, синхронізуємо його з Google Sheets
-        if filename == USER_IDS_FILE:
-             asyncio.run_coroutine_threadsafe(
+        if filename == USER_IDS_FILE and isinstance(data, list):
+            asyncio.run_coroutine_threadsafe(
                 asyncio.to_thread(save_users_to_gsheet, data),
                 loop
             )
@@ -327,8 +413,8 @@ async def send_telegram_reply(ptb_app: Application, user_id: int, text: str):
     user_id_str = str(user_id)
     
     if not isinstance(user_id, int): 
-         logger.warning(f"Спроба відправити відповідь користувачу з не-int ID: {user_id}. Пропущено.")
-         return
+        logger.warning(f"Спроба відправити відповідь користувачу з не-int ID: {user_id}. Пропущено.")
+        return
 
     if user_id_str not in conversations: conversations[user_id_str] = []
     conversations[user_id_str].append({"sender": "bot", "text": text, "timestamp": datetime.now().isoformat()})
@@ -338,25 +424,38 @@ async def send_telegram_reply(ptb_app: Application, user_id: int, text: str):
         await ptb_app.bot.send_message(chat_id=user_id, text=text, parse_mode='Markdown')
         logger.info(f"Надіслано відповідь через Telegram користувачу {user_id}")
     except Exception as e:
-         logger.error(f"Не вдалося надіслати в Telegram користувачу {user_id}: {e}")
+        logger.error(f"Не вдалося надіслати в Telegram користувачу {user_id}: {e}")
 
 def update_user_list(user_id: int, username: str | None, first_name: str | None, last_name: str | None):
-    """Додає або оновлює користувача у списку для статистики."""
+    """
+    ОНОВЛЕНО: Додає або оновлює користувача у списку для статистики.
+    Автоматично заповнює відсутні дані при повторній взаємодії та синхронізує з GSheets.
+    """
     user_data = load_data(USER_IDS_FILE) # Це список словників
     
-    full_name = ' '.join(filter(None, [first_name, last_name]))
-    
-    # Виправляємо проблему: якщо load_data повернув старий формат [1, 2, 3...], 
-    # він буде мігрувати його в main(), але тут він може знову прочитати старий кеш.
-    # Ми перевіряємо, чи елемент є словником, перш ніж викликати .get()
+    # Визначаємо найбільш повне ім'я з наявних даних
+    current_full_name = ' '.join(filter(None, [first_name, last_name]))
     
     found = False
     for i, user_item in enumerate(user_data):
         if isinstance(user_item, dict) and user_item.get('id') == user_id:
-            # Знайдено: оновлюємо дані
-            user_data[i]['username'] = username or user_data[i].get('username')
-            user_data[i]['full_name'] = full_name
+            # Знайдено: оновлюємо дані, заповнюючи прогалини
+            
+            # Якщо Telegram дав нам кращий username, використовуємо його
+            if username:
+                user_data[i]['username'] = username
+            # Якщо Telegram дав нам краще повне ім'я, використовуємо його
+            if current_full_name.strip():
+                user_data[i]['full_name'] = current_full_name
+            # Оновлюємо час останньої активності
             user_data[i]['last_run'] = datetime.now(pytz.timezone("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M:%S")
+            
+            # Оновлюємо відсутні дані, якщо вони були "N/A"
+            if user_data[i].get('username') == 'N/A' and username:
+                user_data[i]['username'] = username
+            if user_data[i].get('full_name') == 'N/A' and current_full_name.strip():
+                user_data[i]['full_name'] = current_full_name
+                
             found = True
             break
             
@@ -364,12 +463,12 @@ def update_user_list(user_id: int, username: str | None, first_name: str | None,
         # Додаємо нового користувача
         new_user = {
             'id': user_id,
-            'username': username,
-            'full_name': full_name,
+            'username': username or 'N/A',
+            'full_name': current_full_name or 'N/A',
             'last_run': datetime.now(pytz.timezone("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M:%S")
         }
         user_data.append(new_user)
-        logger.info(f"Новий користувач додано: {user_id} ({full_name})")
+        logger.info(f"Новий користувач додано: {user_id} ({current_full_name})")
 
     save_data(user_data, USER_IDS_FILE) # Зберігаємо локально і синхронізуємо з Sheets
 
@@ -383,7 +482,8 @@ async def generate_text_with_fallback(prompt: str) -> str | None:
             try:
                 logger.info(f"Спроба {attempt+1} з Gemini API ключем ...{api_key[-4:]}")
                 genai.configure(api_key=api_key)
-                model = genai.GenerativeModel('gemini-2.5-flash') 
+                # Використовуємо gemini-1.5-flash, якщо не зазначено інше
+                model = genai.GenerativeModel('gemini-1.5-flash') 
                 response = await asyncio.to_thread(model.generate_content, prompt, request_options={'timeout': 45})
                 if response.text:
                     logger.info("Успішна відповідь від Gemini.")
@@ -1265,10 +1365,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if 'user_ids' not in context.bot_data:
-        context.bot_data['user_ids'] = set()
+        # NOTE: bot_data['user_ids'] тепер - це set ID, який синхронізується з user_data:List[Dict]
+        # Яка в свою чергу синхронізується з USER_IDS_FILE
+        # У main() ми вже завантажили повний список користувачів з GSheets
+        user_list_of_dicts = load_data(USER_IDS_FILE)
+        context.bot_data['user_ids'] = {user_dict['id'] for user_dict in user_list_of_dicts}
+        
     context.bot_data['user_ids'].add(user.id)
-    # Зберігаємо локально для кешування (синхронізація з sheets відбувається всередині save_data)
-    save_data(list(context.bot_data['user_ids']), 'user_ids.json')
+    # Зберігаємо оновлений список (синхронізація з sheets відбувається всередині save_data)
+    # NOTE: тут ми беремо повний список dicts, а не set ID
+    user_data = load_data(USER_IDS_FILE)
+    if not any(user_dict['id'] == user.id for user_dict in user_data):
+         # Якщо користувач не був доданий в update_user_list (наприклад, якщо він був тільки в set ID), додаємо його.
+         # Але update_user_list вже має гарантувати його наявність. Цей рядок в теорії зайвий.
+         pass
+    
     await update.message.reply_text(
         'Вітаємо! Це офіційний бот каналу новин Бродівської гімназії.\n\n'
         '➡️ Напишіть ваше запитання або пропозицію, щоб відправити її адміністратору.\n'
@@ -1543,7 +1654,8 @@ async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return WAITING_FOR_BROADCAST_MESSAGE
 async def get_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.chat_data['broadcast_message'] = update.message.text
-    user_count = len(context.bot_data.get('user_ids', set()))
+    # Тепер user_data - це List[Dict], тому використовуємо load_data(USER_IDS_FILE) для отримання загальної кількості
+    user_count = len(load_data(USER_IDS_FILE))
     keyboard = [
         [InlineKeyboardButton("Так, надіслати ✅", callback_data="confirm_broadcast")],
         [InlineKeyboardButton("Ні, скасувати ❌", callback_data="cancel_broadcast")]
@@ -1695,7 +1807,7 @@ async def receive_manual_reply(update: Update, context: ContextTypes.DEFAULT_TYP
                 if "✍️ *Напишіть вашу відповідь" in original_msg.text:
                     original_text = original_msg.text.split("\n\n✍️ *Напишіть вашу відповідь")[0]
                 elif "🤖 **Ось відповідь від ШІ:**" in original_msg.text:
-                     original_text = original_msg.text.split("\n\n🤖 **Ось відповідь від ШІ:**")[0]
+                    original_text = original_msg.text.split("\n\n🤖 **Ось відповідь від ШІ:**")[0]
                 else:
                     original_text = original_msg.text
                 
@@ -1711,7 +1823,7 @@ async def receive_manual_reply(update: Update, context: ContextTypes.DEFAULT_TYP
                         reply_markup=None
                     )
             except Exception as e:
-                 logger.warning(f"Не вдалося відредагувати оригінальне повідомлення після ручної відповіді: {e}")
+                logger.warning(f"Не вдалося відредагувати оригінальне повідомлення після ручної відповіді: {e}")
         
         await notify_other_admins(context, update.effective_user.id, original_message)
     except Exception as e:
@@ -1881,9 +1993,9 @@ async def handle_admin_direct_reply(update: Update, context: ContextTypes.DEFAUL
         # Для прямих відповідей медіа відправляємо через send_photo/send_video
         if update.message.photo or update.message.video:
              if update.message.photo:
-                await context.bot.send_photo(chat_id=target_user_id, photo=update.message.photo[-1].file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
+                 await context.bot.send_photo(chat_id=target_user_id, photo=update.message.photo[-1].file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
              elif update.message.video:
-                await context.bot.send_video(chat_id=target_user_id, video=update.message.video.file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
+                 await context.bot.send_video(chat_id=target_user_id, video=update.message.video.file_id, caption=f"{reply_intro}\n\n{reply_text}", parse_mode='Markdown')
              
              # Зберігаємо в історію лише текст
              await send_telegram_reply(context.application, target_user_id, f"{reply_intro}\n\n{reply_text}")
@@ -1992,11 +2104,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         if 'original_message_id' in context.chat_data and update.effective_chat.id in ADMIN_IDS:
              try:
-                await context.bot.edit_message_reply_markup(
-                    chat_id=update.effective_chat.id,
-                    message_id=context.chat_data['original_message_id'],
-                    reply_markup=None
-                )
+                 await context.bot.edit_message_reply_markup(
+                     chat_id=update.effective_chat.id,
+                     message_id=context.chat_data['original_message_id'],
+                     reply_markup=None
+                 )
              except Exception:
                  pass 
                  
@@ -2205,23 +2317,12 @@ async def main() -> None:
     application.bot_data['admin_contacts'] = load_data('admin_contacts.json')
     
     # Завантаження ID користувачів
-    user_data = load_data(USER_IDS_FILE)
+    user_data = load_data(USER_IDS_FILE) # Тепер це List[Dict]
     
-    # === ФІКС ПОМИЛКИ: САНІТИЗАЦІЯ ДАНИХ КОРИСТУВАЧІВ (Migration) ===
-    # Виправлення проблеми, коли старі ID зберігалися як прості числа (int)
-    sanitized_user_data = []
-    for item in user_data:
-        if isinstance(item, dict) and 'id' in item:
-            # Новий, правильний формат (словник)
-            sanitized_user_data.append(item)
-        elif isinstance(item, int):
-            # Старий, простий формат (ціле число). Конвертуємо у словник.
-            sanitized_user_data.append({'id': item, 'full_name': 'Migrated User', 'username': None, 'last_run': 'N/A (Migrated)'})
-        # Інакше ігноруємо невідомий або пошкоджений елемент
-            
-    # Тепер створюємо множину з санітизованих даних
-    application.bot_data['user_ids'] = {user['id'] for user in sanitized_user_data if 'id' in user}
-    # ===============================================================
+    # === САНІТИЗАЦІЯ ДАНИХ КОРИСТУВАЧІВ ===
+    # Створюємо множину ID з усіх завантажених словників для швидкого пошуку
+    application.bot_data['user_ids'] = {user['id'] for user in user_data if 'id' in user}
+    # ======================================
     
     application.bot_data['anonymous_map'] = {}
     logger.info(f"Завантажено {len(application.bot_data['user_ids'])} унікальних ID користувачів.")
