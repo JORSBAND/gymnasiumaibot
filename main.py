@@ -62,6 +62,8 @@ GSHEET_NAME = os.environ.get("GSHEET_NAME", "Бродівська гімназі
 GSHEET_WORKSHEET_NAME = os.environ.get("GSHEET_WORKSHEET_NAME", "База_Знань")
 # Назва листа (вкладки) у таблиці для Користувачів
 USERS_GSHEET_WORKSHEET_NAME = os.environ.get("USERS_GSHEET_WORKSHEET_NAME", "Користувачі")
+# НОВИЙ ЛИСТ: Для запланованих постів
+SCHEDULE_GSHEET_WORKSHEET_NAME = os.environ.get("SCHEDULE_GSHEET_WORKSHEET_NAME", "Заплановані_Пости")
 # JSON-ключі сервісного облікового запису (як змінна оточення)
 GCP_CREDENTIALS_JSON = os.environ.get("GCP_CREDENTIALS_JSON", "{}") 
 
@@ -153,6 +155,36 @@ def save_data_to_gsheet(kb_data: Dict[str, dict]) -> bool:
         logger.error(f"Помилка запису KB в Google Sheets: {e}")
         return False
 
+# ДОДАНО: Функція для збереження запланованих постів у Google Sheets
+def save_scheduled_to_gsheet(scheduled_posts: List[dict]) -> bool:
+    """Зберігає список запланованих постів у Google Sheets."""
+    worksheet = get_gsheet_client(SCHEDULE_GSHEET_WORKSHEET_NAME)
+    if not worksheet:
+        logger.error("Не вдалося отримати клієнт Google Sheets для збереження запланованих постів.")
+        return False
+    
+    try:
+        # Форматуємо дані: [["ID", "Час відправки (ISO)", "Текст", "Photo ID", "Video ID"], ...]
+        records = [["ID", "Час відправки (ISO)", "Текст", "Photo ID", "Video ID"]]
+        
+        for post in scheduled_posts:
+            records.append([
+                post.get('id', ''),
+                post.get('time', ''),
+                post.get('text', ''),
+                post.get('photo', ''),
+                post.get('video', '')
+            ])
+        
+        # Очищуємо весь лист і завантажуємо нові дані
+        worksheet.batch_clear(["A1:Z1000"]) 
+        worksheet.update('A1', records)
+        logger.info(f"✅ Успішно збережено {len(scheduled_posts)} запланованих постів у Google Sheets.")
+        return True
+    except Exception as e:
+        logger.error(f"Помилка запису запланованих постів у Google Sheets: {e}")
+        return False
+
 def save_users_to_gsheet(users: List[dict]) -> bool:
     """
     ЗБЕРЕЖЕННЯ КОРИСТУВАЧІВ (ОНОВЛЕНО):
@@ -237,6 +269,47 @@ def fetch_kb_from_sheets() -> Dict[str, dict] | None:
     except Exception as e:
         logger.error(f"Помилка читання KB з Google Sheets: {e}")
         return None
+
+# ДОДАНО: Функція для завантаження запланованих постів із Google Sheets
+def fetch_scheduled_from_sheets() -> List[dict] | None:
+    """Завантажує список запланованих постів із Google Sheets."""
+    worksheet = get_gsheet_client(SCHEDULE_GSHEET_WORKSHEET_NAME)
+    if not worksheet: return None 
+    
+    try:
+        list_of_lists = worksheet.get_all_values()
+        if not list_of_lists or len(list_of_lists) < 2: return []
+
+        header = [h.strip() for h in list_of_lists[0]]
+        
+        # Індекси стовпців
+        id_idx = header.index("ID") if "ID" in header else 0
+        time_idx = header.index("Час відправки (ISO)") if "Час відправки (ISO)" in header else 1
+        text_idx = header.index("Текст") if "Текст" in header else 2
+        photo_idx = header.index("Photo ID") if "Photo ID" in header else 3
+        video_idx = header.index("Video ID") if "Video ID" in header else 4
+
+        data_rows = list_of_lists[1:]
+        posts = []
+        for row in data_rows:
+            post_id = row[id_idx].strip() if len(row) > id_idx else None
+            if not post_id: continue
+
+            posts.append({
+                'id': post_id,
+                'time': row[time_idx].strip() if len(row) > time_idx else None,
+                'text': row[text_idx].strip() if len(row) > text_idx else None,
+                'photo': row[photo_idx].strip() if len(row) > photo_idx and row[photo_idx].strip() else None,
+                'video': row[video_idx].strip() if len(row) > video_idx and row[video_idx].strip() else None
+            })
+        
+        logger.info(f"✅ Успішно завантажено {len(posts)} запланованих постів із Google Sheets.")
+        return posts
+
+    except Exception as e:
+        logger.error(f"Помилка читання запланованих постів з Google Sheets: {e}")
+        return None
+
 
 def fetch_users_from_sheets() -> List[dict] | None:
     """
@@ -351,7 +424,23 @@ def load_data(filename: str, default_type: Any = None) -> Any:
                             # Мігруємо старі прості ID в словники з мінімальними даними
                             sanitized_users.append({'id': item, 'full_name': 'N/A', 'username': None, 'last_run': 'N/A (Migrated)'})
                 return sanitized_users
-            
+
+            # ЛОГІКА ДЛЯ ЗАПЛАНОВАНИХ ПОСТІВ
+            if filename == SCHEDULED_POSTS_FILE and default_type == []:
+                # 1. Спроба завантажити з Google Sheets
+                scheduled_from_sheets = fetch_scheduled_from_sheets()
+                
+                # 2. Якщо завантаження з Sheets не вдалося або воно порожнє, повертаємо те, що є
+                if scheduled_from_sheets is not None:
+                    # 3. Зберігаємо локально для кешування
+                    # Примітка: Локально зберігаємо, щоб мати список job_id, але намагаємося завжди читати Sheets
+                    save_data(scheduled_from_sheets, filename)
+                    return scheduled_from_sheets
+                
+                # Якщо локальний файл існує, але Sheets недоступний, повертаємо локальний кеш
+                # Якщо локальний файл не існує (FileNotFoundError), то ми сюди не потрапимо, а підемо в except
+                return data
+
             return data
     except (FileNotFoundError, json.JSONDecodeError):
         if filename == KNOWLEDGE_BASE_FILE:
@@ -378,6 +467,17 @@ def load_data(filename: str, default_type: Any = None) -> Any:
                 return users_from_sheets
             # 3. Якщо все не вдалося, повертаємо порожній список
             return []
+        
+        # ЛОГІКА ДЛЯ ЗАПЛАНОВАНИХ ПОСТІВ: Якщо файл не знайдено, намагаємося завантажити з Sheets
+        if filename == SCHEDULED_POSTS_FILE and default_type == []:
+            scheduled_from_sheets = fetch_scheduled_from_sheets()
+            if scheduled_from_sheets is not None:
+                # Зберігаємо локально кеш
+                save_data(scheduled_from_sheets, filename)
+                return scheduled_from_sheets
+            
+            logger.warning("Неможливо завантажити заплановані пости з Sheets або локального кешу. Повертаю порожній список.")
+            return []
             
         if default_type is not None:
             return default_type
@@ -401,6 +501,12 @@ def save_data(data: Any, filename: str) -> None:
         if filename == USER_IDS_FILE and isinstance(data, list):
             asyncio.run_coroutine_threadsafe(
                 asyncio.to_thread(save_users_to_gsheet, data),
+                loop
+            )
+        # ЛОГІКА ДЛЯ ЗАПЛАНОВАНИХ ПОСТІВ
+        if filename == SCHEDULED_POSTS_FILE and isinstance(data, list):
+            asyncio.run_coroutine_threadsafe(
+                asyncio.to_thread(save_scheduled_to_gsheet, data),
                 loop
             )
             
@@ -1126,15 +1232,20 @@ async def faq_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def scheduled_broadcast_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     job_data = context.job.data
+    job_id = context.job.name
     logger.info(f"Виконую заплановану розсилку: {job_data.get('text', '')[:30]}")
+    
+    # Виконуємо розсилку
     await do_broadcast(
         context,
         text_content=job_data.get('text', ''),
         photo=job_data.get('photo'),
         video=job_data.get('video')
     )
+    
+    # Видаляємо завдання з локального списку та Sheets
     scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
-    updated_posts = [p for p in scheduled_posts if p.get('id') != context.job.name]
+    updated_posts = [p for p in scheduled_posts if p.get('id') != job_id]
     save_data(updated_posts, SCHEDULED_POSTS_FILE)
 
 def remove_job_if_exists(name: str, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -1150,22 +1261,60 @@ async def start_schedule_news(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not query: return ConversationHandler.END
     if query.from_user.id not in ADMIN_IDS: return ConversationHandler.END
     await query.answer()
-    await query.edit_message_text("Надішліть текст для запланованої новини. /cancel для скасування.")
+    await query.edit_message_text("Надішліть **текст** для запланованої новини. /cancel для скасування.")
     return WAITING_FOR_SCHEDULE_TEXT
 
 async def get_schedule_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.chat_data['schedule_text'] = update.message.text
-    context.chat_data['schedule_photo'] = None 
+    # Перехід до очікування медіа
+    await update.message.reply_text(
+        "Текст збережено. Якщо ви хочете додати **фото або відео**, надішліть його зараз.\n"
+        "Якщо медіа не потрібне, введіть /skip_media.", 
+        parse_mode='Markdown'
+    )
+    return WAITING_FOR_MEDIA # Змінюємо стан на WAITING_FOR_MEDIA
+
+async def skip_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обробник для пропуску додавання медіа."""
+    context.chat_data['schedule_photo'] = None
     context.chat_data['schedule_video'] = None
     
     await update.message.reply_text(
-        "Текст збережено. Тепер введіть дату та час для розсилки.\n\n"
+        "Медіа пропущено. Тепер введіть **дату та час** для розсилки.\n\n"
         "**Формат: `ДД.ММ.РРРР ГГ:ХХ`**\n"
         "Наприклад: `25.12.2024 18:30`\n\n"
         "/cancel для скасування.",
         parse_mode='Markdown'
     )
     return WAITING_FOR_SCHEDULE_TIME
+
+async def get_schedule_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Оновлений обробник для отримання медіа перед введенням часу."""
+    photo = update.message.photo[-1].file_id if update.message.photo else None
+    video = update.message.video.file_id if update.message.video else None
+    
+    if photo:
+        context.chat_data['schedule_photo'] = photo
+        context.chat_data['schedule_video'] = None
+        media_type = "фото"
+    elif video:
+        context.chat_data['schedule_photo'] = None
+        context.chat_data['schedule_video'] = video
+        media_type = "відео"
+    else:
+        # Це має бути перехоплено фільтром, але на всякий випадок
+        await update.message.reply_text("❌ Будь ласка, надішліть коректне фото або відео, або введіть /skip_media.")
+        return WAITING_FOR_MEDIA
+
+    await update.message.reply_text(
+        f"✅ {media_type.capitalize()} збережено. Тепер введіть **дату та час** для розсилки.\n\n"
+        "**Формат: `ДД.ММ.РРРР ГГ:ХХ`**\n"
+        "Наприклад: `25.12.2024 18:30`\n\n"
+        "/cancel для скасування.",
+        parse_mode='Markdown'
+    )
+    return WAITING_FOR_SCHEDULE_TIME
+
 
 async def get_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     time_str = update.message.text
@@ -1181,11 +1330,15 @@ async def get_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             
         context.chat_data['schedule_time_str'] = schedule_time_aware.strftime("%d.%m.%Y о %H:%M")
         context.chat_data['schedule_time_obj'] = schedule_time_aware
+        context.chat_data['schedule_time_iso'] = schedule_time_aware.isoformat()
 
         text = context.chat_data['schedule_text']
+        media_info = ""
+        if context.chat_data.get('schedule_photo') or context.chat_data.get('schedule_video'):
+             media_info = " (з медіа)"
         
         preview_message = (
-            f"**Попередній перегляд запланованого поста:**\n\n"
+            f"**Попередній перегляд запланованого поста{media_info}:**\n\n"
             f"{text}\n\n"
             f"---\n"
             f"🗓️ Запланувати розсилку на **{context.chat_data['schedule_time_str']}**?"
@@ -1196,7 +1349,24 @@ async def get_schedule_time(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             [InlineKeyboardButton("Ні, скасувати ❌", callback_data="cancel_schedule_post")]
         ]
         
-        await update.message.reply_text(preview_message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        # Надсилаємо попередній перегляд, включаючи медіа, якщо воно є
+        if context.chat_data.get('schedule_photo'):
+            await update.message.reply_photo(
+                photo=context.chat_data['schedule_photo'],
+                caption=preview_message, 
+                reply_markup=InlineKeyboardMarkup(keyboard), 
+                parse_mode='Markdown'
+            )
+        elif context.chat_data.get('schedule_video'):
+            await update.message.reply_video(
+                video=context.chat_data['schedule_video'],
+                caption=preview_message, 
+                reply_markup=InlineKeyboardMarkup(keyboard), 
+                parse_mode='Markdown'
+            )
+        else:
+             await update.message.reply_text(preview_message, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
         return CONFIRMING_SCHEDULE_POST
 
     except ValueError:
@@ -1211,27 +1381,36 @@ async def confirm_schedule_post(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
 
+    job_id = f"scheduled_post_{uuid.uuid4().hex[:10]}"
+    schedule_time = context.chat_data.get('schedule_time_obj')
+
     post_data = {
+        'id': job_id,
+        'time': context.chat_data.get('schedule_time_iso'), # ISO-формат для Sheets
         'text': context.chat_data.get('schedule_text'),
         'photo': context.chat_data.get('schedule_photo'),
         'video': context.chat_data.get('schedule_video'),
     }
-    schedule_time = context.chat_data.get('schedule_time_obj')
     
     if not post_data['text'] or not schedule_time:
         await query.edit_message_text("❌ Помилка: дані для планування втрачено. Почніть знову.")
         return ConversationHandler.END
 
-    job_id = f"scheduled_post_{uuid.uuid4().hex[:10]}"
-    
+    # Зберігаємо пост у локальний кеш (який синхронізується з Sheets)
     scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
-    scheduled_posts.append({'id': job_id, 'text': post_data['text'], 'time': schedule_time.isoformat()})
+    scheduled_posts.append(post_data)
     save_data(scheduled_posts, SCHEDULED_POSTS_FILE)
 
+    # Додаємо завдання в JobQueue
     context.job_queue.run_once(scheduled_broadcast_job, when=schedule_time, data=post_data, name=job_id)
 
     time_str = context.chat_data.get('schedule_time_str', 'невідомий час')
-    await query.edit_message_text(f"✅ **Пост успішно заплановано на {time_str}.**", parse_mode='Markdown')
+    
+    # Видаляємо кнопки підтвердження
+    await query.edit_message_reply_markup(reply_markup=None) 
+    
+    # Оновлюємо повідомлення
+    await query.message.reply_text(f"✅ **Пост успішно заплановано на {time_str} та збережено в Google Sheets.**", parse_mode='Markdown')
     
     context.chat_data.clear()
     return ConversationHandler.END
@@ -1248,6 +1427,7 @@ async def view_scheduled_posts(update: Update, context: ContextTypes.DEFAULT_TYP
     if query.from_user.id not in ADMIN_IDS: return
     await query.answer()
     
+    # Завантажуємо актуальний список (через load_data він спробує завантажити з Sheets)
     scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
     
     if not scheduled_posts:
@@ -1258,11 +1438,21 @@ async def view_scheduled_posts(update: Update, context: ContextTypes.DEFAULT_TYP
     kyiv_timezone = pytz.timezone("Europe/Kyiv")
 
     for post in scheduled_posts:
-        run_time = datetime.fromisoformat(post['time']).astimezone(kyiv_timezone).strftime("%d.%m.%Y о %H:%M")
+        try:
+            # Парсимо час з ISO формату
+            run_time_dt = datetime.fromisoformat(post['time'])
+            run_time_str = run_time_dt.astimezone(kyiv_timezone).strftime("%d.%m.%Y о %H:%M")
+        except:
+            run_time_str = post.get('time', 'Невідомий час')
+
         text = post.get('text', '')[:200]
-        
+        media_icon = ""
+        if post.get('photo') or post.get('video'):
+            media_icon = " 🖼️"
+
         message = (
-            f"🗓️ **Час відправки:** {run_time}\n\n"
+            f"🗓️ **Час відправки:** {run_time_str}{media_icon}\n"
+            f"**ID:** `{post['id']}`\n\n"
             f"**Текст:**\n_{text}..._"
         )
         
@@ -1282,12 +1472,13 @@ async def cancel_scheduled_job_button(update: Update, context: ContextTypes.DEFA
     
     job_name = query.data.split(':', 1)[1]
     
+    # Видаляємо з локального списку та Sheets
     scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
-    updated_list = [p for p in scheduled_posts if p['id'] != job_name]
+    updated_list = [p for p in scheduled_posts if p.get('id') != job_name]
     save_data(updated_list, SCHEDULED_POSTS_FILE)
 
     if remove_job_if_exists(job_name, context):
-        await query.edit_message_text("✅ Заплановану розсилку скасовано.")
+        await query.edit_message_text("✅ Заплановану розсилку скасовано та видалено з Google Sheets.")
     else:
         await query.edit_message_text("❌ Цей пост вже було надіслано або скасовано раніше.")
 async def generate_post_from_site(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2366,6 +2557,10 @@ async def main() -> None:
     application.bot_data['user_ids'] = {user['id'] for user in user_data if 'id' in user}
     # ======================================
     
+    # Завантажуємо заплановані пости. Це також ініціалізує JobQueue для старих постів.
+    scheduled_posts = load_data(SCHEDULED_POSTS_FILE, [])
+    # Оскільки scheduled_posts може містити дані, які потрібно додати в JobQueue
+    
     application.bot_data['anonymous_map'] = {}
     logger.info(f"Завантажено {len(application.bot_data['user_ids'])} унікальних ID користувачів.")
 
@@ -2441,6 +2636,7 @@ async def main() -> None:
         entry_points=[CallbackQueryHandler(start_schedule_news, pattern='^admin_schedule_news$')],
         states={
             WAITING_FOR_SCHEDULE_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_schedule_text)],
+            WAITING_FOR_MEDIA: [MessageHandler(filters.PHOTO | filters.VIDEO, get_schedule_media), CommandHandler('skip_media', skip_media)], # Оновлено
             WAITING_FOR_SCHEDULE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_schedule_time)],
             CONFIRMING_SCHEDULE_POST: [
                 CallbackQueryHandler(confirm_schedule_post, pattern='^confirm_schedule_post$'),
@@ -2493,7 +2689,7 @@ async def main() -> None:
     application.add_handler(anonymous_reply_conv)
     application.add_handler(admin_reply_conv)
     application.add_handler(create_news_conv)
-    application.add_handler(schedule_news_conv)
+    application.add_handler(schedule_news_conv) # Вже оновлено в цьому блоці
     application.add_handler(test_message_conv)
     application.add_handler(MessageHandler(filters.UpdateType.CHANNEL_POST, handle_channel_post))
     application.add_handler(user_conv)
@@ -2505,6 +2701,23 @@ async def main() -> None:
     kyiv_timezone = pytz.timezone("Europe/Kyiv")
     application.job_queue.run_daily(check_website_for_updates, time=dt_time(hour=9, minute=0, tzinfo=kyiv_timezone))
     
+    # ПЕРЕІНІЦІАЛІЗАЦІЯ ЗАПЛАНОВАНИХ ПОСТІВ З SHEETS
+    for post in scheduled_posts:
+        try:
+            run_time_dt = datetime.fromisoformat(post['time'])
+            if run_time_dt > datetime.now().astimezone(pytz.utc): # Перевірка, чи час ще не минув
+                application.job_queue.run_once(
+                    scheduled_broadcast_job, 
+                    when=run_time_dt, 
+                    data=post, 
+                    name=post['id']
+                )
+                logger.info(f"Відновлено запланований пост: {post['id']} на {run_time_dt}")
+            else:
+                 logger.warning(f"Пропущено застарілий запланований пост: {post['id']} на {run_time_dt}")
+        except Exception as e:
+            logger.error(f"Помилка відновлення запланованого посту {post.get('id')}: {e}")
+
     # ДОДАНО: Задача для запобігання засинанню (кожні 10 хвилин)
     application.job_queue.run_repeating(
         ping_self_for_wakeup,
